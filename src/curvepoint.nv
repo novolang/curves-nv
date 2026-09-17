@@ -1,0 +1,349 @@
+// curvepoint.nv — the point, the vector and the rectangle this
+// package's signatures are spelled in, and the bridge to geometry-nv's.
+//
+// WHY THIS PACKAGE CARRIES ITS OWN POINT TYPE
+//
+// geometry-nv already has `GeomPointF`, and it is the right type for a
+// drawing loop: it is `@value`, which lays it out with true field
+// widths, passes it in registers, and stores a `[GeomPointF]` as one
+// flat buffer with no per-element reference count.
+//
+// `@value` is also the reason this package cannot use it.  SPEC § 14.5
+// allows an unboxed struct to be a local, a parameter, a return, a
+// field of another `@value` struct and an element of a list — and
+// nothing else.  It may not be a `Result` payload, an optional payload,
+// a tuple element, an enum payload, or a field of a boxed struct.
+//
+// Every one of those is a position this package's API needs:
+//
+//   `CurveCubic` holds four points as FIELDS.
+//   `subdivide` answers a TUPLE of two curves.
+//   `segment` answers a `Result`, because a range can be inverted.
+//   `unit_tangent` answers an OPTIONAL, because a cusp has none.
+//   `CurveSegment` is an ENUM over the curve families.
+//
+// Making `CurveCubic` itself `@value` would satisfy the field rule and
+// then fail all four of the others, because `@value` is viral upward
+// with no ceiling: the first type in the chain that is an enum, an
+// optional, a `Result` or a tuple forces everything below it to be
+// boxed.  Each of those five positions is refused with E2015, under
+// the filing `a-value-struct-cannot-cross-a-boxed-boundary-so-a-
+// fallible-codec-has-no-unboxed-return`, open against the language;
+// and the decision here is the one
+// geometry-nv's own header comment anticipates: a consumer that wants
+// one of those inside a boxed position "carries the numbers instead and
+// rebuilds the struct", the way svg-nv's `SvgTransform` does.
+//
+// So `CurvePoint` is a boxed pair of floats, the whole API is spelled
+// in it, and the bridge is written ONCE — here, in six functions —
+// rather than at every call site in every consumer.  When the language
+// closes that gap, these types become aliases and the bridge becomes
+// the identity.
+
+use geompoint
+use geomrect
+
+// A position in continuous two-dimensional space.
+//
+// Boxed, so that it can be a field, an optional payload, a `Result`
+// payload and an enum payload — which is what this package's API is
+// made of.  `to_geom` converts to geometry-nv's unboxed `GeomPointF`
+// for a drawing loop that wants the flat buffer.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.pt(3.0, 4.0).x}")   // 3
+// ```
+pub struct CurvePoint
+    // Distance along the first axis.  Whether that is rightwards or
+    // leftwards is the caller's convention, not this package's.
+    x: Float
+    // Distance along the second axis.  In a screen coordinate system
+    // it grows downwards; in a mathematical one it grows upwards.  No
+    // function here assumes either.
+    y: Float
+
+// A displacement: a direction and a length, with no position.
+//
+// A separate type from `CurvePoint` because the operations differ — two
+// points have a midpoint and two vectors have a sum — and because a
+// tangent is not a place.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.vec(1.0, 0.0).dx}")   // 1
+// ```
+pub struct CurveVec
+    // Displacement along the first axis.
+    dx: Float
+    // Displacement along the second axis.
+    dy: Float
+
+// An axis-aligned rectangle, as a corner and a size.
+//
+// What `bounds` and `hull_bounds` answer.  A rectangle whose width or
+// height is zero is a degenerate but legal answer — a straight
+// horizontal curve has one — and is not an empty rectangle.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.rect(0.0, 0.0, 2.0, 1.0).height}")   // 1
+// ```
+pub struct CurveRect
+    // The corner with the smallest coordinates on both axes.
+    x: Float
+    // The same, on the second axis.
+    y: Float
+    // Extent along the first axis, never negative.
+    width: Float
+    // Extent along the second axis, never negative.
+    height: Float
+
+// A point from two numbers.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.pt(1.0, 2.0).y}")   // 2
+// ```
+pub fn pt(x: Float, y: Float) -> CurvePoint []
+    todo("curves-nv.curvepoint.pt")
+
+// A vector from two numbers.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.vec(1.0, 2.0).dy}")   // 2
+// ```
+pub fn vec(dx: Float, dy: Float) -> CurveVec []
+    todo("curves-nv.curvepoint.vec")
+
+// A rectangle from a corner and a size.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.rect(1.0, 1.0, 2.0, 3.0).width}")   // 2
+// ```
+pub fn rect(x: Float, y: Float, width: Float, height: Float) -> CurveRect []
+    todo("curves-nv.curvepoint.rect")
+
+// The point offset by a vector.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.offset(curvepoint.pt(1.0, 1.0), curvepoint.vec(2.0, 0.0)).x}")
+// ```
+pub fn offset(p: CurvePoint, v: CurveVec) -> CurvePoint []
+    todo("curves-nv.curvepoint.offset")
+
+// The vector from one point to another.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.between(curvepoint.pt(1.0, 0.0), curvepoint.pt(4.0, 0.0)).dx}")
+// ```
+pub fn between(from: CurvePoint, to: CurvePoint) -> CurveVec []
+    todo("curves-nv.curvepoint.between")
+
+// The point a fraction of the way from one to another.
+//
+// The one operation a de Casteljau subdivision is entirely made of, so
+// it is public: a reader checking an implementation against the
+// algorithm sees the same word.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.lerp(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0), 0.25).x}")
+// ```
+pub fn lerp(a: CurvePoint, b: CurvePoint, t: Float) -> CurvePoint []
+    todo("curves-nv.curvepoint.lerp")
+
+// How far apart two points are.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.distance(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))}")
+// ```
+pub fn distance(a: CurvePoint, b: CurvePoint) -> Float []
+    todo("curves-nv.curvepoint.distance")
+
+// A vector's length.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.length(curvepoint.vec(3.0, 4.0))}")   // 5
+// ```
+pub fn length(v: CurveVec) -> Float []
+    todo("curves-nv.curvepoint.length")
+
+// A vector scaled to length one, or `None` when it has no length.
+//
+// `None` rather than a zero "unit" vector, because a zero unit vector
+// breaks every caller downstream and a curve really can have a cusp
+// where the derivative vanishes.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     match curvepoint.normalize(curvepoint.vec(3.0, 4.0))
+//         Some(u) => println("${u.dx}")         // 0.6
+//         None    => println("no direction")
+// ```
+pub fn normalize(v: CurveVec) -> ?CurveVec []
+    todo("curves-nv.curvepoint.normalize")
+
+// The vector turned a quarter turn anticlockwise.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.perpendicular(curvepoint.vec(1.0, 0.0)).dy}")   // 1
+// ```
+pub fn perpendicular(v: CurveVec) -> CurveVec []
+    todo("curves-nv.curvepoint.perpendicular")
+
+// The smallest rectangle containing every point of a list.
+//
+// A degenerate rectangle for a single point, and a zero rectangle at
+// the origin for an empty list — the answer a `@value` rectangle has to
+// carry, since it cannot be an optional payload.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     let r = curvepoint.bounds_of([curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 1.0)])
+//     println("${r.width}")                     // 2
+// ```
+pub fn bounds_of(points: [CurvePoint]) -> CurveRect []
+    todo("curves-nv.curvepoint.bounds_of")
+
+// The rectangle containing both of two rectangles.
+//
+// What a path's bounds are built from, one segment at a time.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvepoint.rect(0.0, 0.0, 1.0, 1.0)
+//     let b = curvepoint.rect(2.0, 0.0, 1.0, 1.0)
+//     println("${curvepoint.union(a, b).width}")   // 3
+// ```
+pub fn union(a: CurveRect, b: CurveRect) -> CurveRect []
+    todo("curves-nv.curvepoint.union")
+
+// This package's point as geometry-nv's.
+//
+// THE BRIDGE, and it is written once here so that no consumer writes
+// it.  geometry-nv's `GeomPointF` is `@value`: unboxed, register
+// passed, and stored in a list as one flat buffer.  Everything a
+// drawing loop wants, and — because SPEC § 14.5 forbids an unboxed
+// struct in a `Result`, an optional, a tuple, an enum payload or a
+// boxed struct's field — nothing this package's API can be spelled in.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.to_geom(curvepoint.pt(1.0, 2.0)).y}")   // 2
+// ```
+pub fn to_geom(p: CurvePoint) -> GeomPointF []
+    todo("curves-nv.curvepoint.to_geom")
+
+// geometry-nv's point as this package's.
+//
+// ```novo
+// use curvepoint
+// use geompoint
+//
+// fn main() [io]
+//     println("${curvepoint.of_geom(geompoint.ptf(1.0, 2.0)).x}")   // 1
+// ```
+pub fn of_geom(p: GeomPointF) -> CurvePoint []
+    todo("curves-nv.curvepoint.of_geom")
+
+// This package's vector as geometry-nv's.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.vec_to_geom(curvepoint.vec(1.0, 0.0)).dx}")   // 1
+// ```
+pub fn vec_to_geom(v: CurveVec) -> GeomVecF []
+    todo("curves-nv.curvepoint.vec_to_geom")
+
+// geometry-nv's vector as this package's.
+//
+// ```novo
+// use curvepoint
+// use geompoint
+//
+// fn main() [io]
+//     println("${curvepoint.vec_of_geom(geompoint.vecf(1.0, 0.0)).dx}")   // 1
+// ```
+pub fn vec_of_geom(v: GeomVecF) -> CurveVec []
+    todo("curves-nv.curvepoint.vec_of_geom")
+
+// This package's rectangle as geometry-nv's.
+//
+// ```novo
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvepoint.rect_to_geom(curvepoint.rect(0.0, 0.0, 2.0, 1.0)).max.x}")
+// ```
+pub fn rect_to_geom(r: CurveRect) -> GeomRectF []
+    todo("curves-nv.curvepoint.rect_to_geom")
+
+// geometry-nv's rectangle as this package's.
+//
+// ```novo
+// use curvepoint
+// use geomrect
+//
+// fn main() [io]
+//     println("${curvepoint.rect_of_geom(geomrect.of_xywh(0.0, 0.0, 2.0, 1.0)).width}")
+// ```
+pub fn rect_of_geom(r: GeomRectF) -> CurveRect []
+    todo("curves-nv.curvepoint.rect_of_geom")
+
+// A whole list of this package's points as geometry-nv's.
+//
+// What `flatten`'s output goes through on its way to a vertex buffer,
+// and the one place the per-point conversion is worth writing as a
+// loop rather than at the call site.
+//
+// ```novo
+// use std.list
+// use curvepoint
+//
+// fn main() [io]
+//     println("${list.len(curvepoint.to_geom_list([curvepoint.pt(0.0, 0.0)]))}")   // 1
+// ```
+pub fn to_geom_list(points: [CurvePoint]) -> [GeomPointF] []
+    todo("curves-nv.curvepoint.to_geom_list")

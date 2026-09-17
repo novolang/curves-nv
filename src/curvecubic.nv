@@ -1,0 +1,551 @@
+// curvecubic.nv — the cubic Bézier, and the operations every other
+// curve in this package is reduced to.
+//
+// WHY THE CUBIC IS THE CENTRE
+//
+// A quadratic Bézier is a cubic with its control points in particular
+// places.  An elliptical arc is approximated by cubics to any
+// tolerance.  A B-spline segment of degree three IS a cubic in a
+// different basis, and a Catmull-Rom segment is a cubic with its
+// control points computed from four knot points.  So every family in
+// this package answers `to_cubics`, and the hard work — arc length,
+// nearest point, exact bounds, line intersection — is written once,
+// here.
+//
+// THE OPERATIONS AND WHAT EACH ONE COSTS
+//
+//   eval            three linear interpolations.  Exact.
+//   derivative      a QUADRATIC, exactly: the derivative of a degree-n
+//                   Bézier is a degree n-1 Bézier over the differences
+//                   of the control points.  Not an approximation.
+//   curvature       exact, from the first and second derivatives.
+//   arc_length      NO CLOSED FORM EXISTS for a cubic.  It is a
+//                   quadrature, and the tolerance is the caller's.
+//   t_for_length    the inverse, by Newton iteration over the
+//                   quadrature.  Also to a tolerance.
+//   subdivide       de Casteljau.  Exact, and the two halves join at
+//                   the split point with the same tangent.
+//   flatten         recursive subdivision against an error bound.
+//   nearest_point   the roots of a quintic, found numerically.
+//   bounds          exact, from the derivative's roots.
+//   hull_bounds     the control points' bounding box.  Cheap, and
+//                   never smaller than the exact bounds.
+//   intersect_line  the roots of a cubic in one variable.  Exact.
+//
+// EVERY TOLERANCE IS AN ARGUMENT
+//
+// A flattener with a hidden tolerance produces a different polyline on
+// every caller's screen, and a caller drawing at four times the zoom
+// has no way to ask for four times the fidelity.  So no function here
+// has a default tolerance, and a tolerance of zero is a refusal rather
+// than a loop that does not terminate.
+
+use curvepoint
+use geomxform
+
+// A cubic Bézier: a start, two controls and an end.
+//
+// `eval(0)` is `p0` and `eval(1)` is `p3`.  The curve passes through
+// neither control point; it is pulled towards them.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+//                              curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+//     println("${curvecubic.eval(c, 0.0).x}")   // 0
+// ```
+pub struct CurveCubic
+    // Where the curve starts.
+    p0: CurvePoint
+    // The first control point.  The tangent at the start points from
+    // `p0` towards it.
+    p1: CurvePoint
+    // The second control point.  The tangent at the end points from it
+    // towards `p3`.
+    p2: CurvePoint
+    // Where the curve ends.
+    p3: CurvePoint
+
+// A point on a curve, with the parameter that put it there.
+//
+// Both, because a caller that found the nearest point on a curve
+// almost always wants to split the curve there, and re-deriving the
+// parameter from the point is a second search.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     println("${CurveProjection { t: 0.5, point: curvepoint.pt(0.0, 0.0), distance: 1.0 }.t}")
+// ```
+pub struct CurveProjection
+    // The parameter, `0.0 ..= 1.0`.
+    t: Float
+    // The point on the curve.
+    point: CurvePoint
+    // How far the queried point was from it.
+    distance: Float
+
+// Where a curve crosses a line.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     println("${CurveHit { t: 0.25, point: curvepoint.pt(0.0, 0.0), line_t: 0.5 }.t}")
+// ```
+pub struct CurveHit
+    // The curve's parameter at the crossing.
+    t: Float
+    // The crossing point.
+    point: CurvePoint
+    // How far along the line the crossing is, as a multiple of the
+    // line's own direction vector: `0.0` at its start, `1.0` at its
+    // end, outside that when the crossing is on the line's extension.
+    // Carried because a caller intersecting a curve with a SEGMENT
+    // needs it and cannot recover it without dividing by whichever
+    // component of the direction is larger.
+    line_t: Float
+
+// A cubic from four points.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                              curvepoint.pt(2.0, 1.0), curvepoint.pt(3.0, 1.0))
+//     println("${curvecubic.eval(c, 1.0).x}")   // 3
+// ```
+pub fn cubic(p0: CurvePoint, p1: CurvePoint, p2: CurvePoint, p3: CurvePoint) -> CurveCubic []
+    todo("curves-nv.curvecubic.cubic")
+
+// A straight line as a cubic: the controls at the one-third and
+// two-thirds points.
+//
+// Not a convenience.  It is the ONLY spelling of a line that composes
+// with the rest of this package — a path of mixed lines and curves is
+// a list of cubics, and a caller that special-cased lines would write
+// the flattening, the arc length and the nearest point twice.  The
+// control placement is the one that makes the parameterisation uniform,
+// so `eval(c, 0.5)` is the midpoint.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 0.0))
+//     println("${curvecubic.eval(c, 0.5).x}")   // 1.5
+// ```
+pub fn line(from: CurvePoint, to: CurvePoint) -> CurveCubic []
+    todo("curves-nv.curvecubic.line")
+
+// The point at a parameter.
+//
+// Clamps rather than refusing: `eval(c, 2.0)` is `p3`.  A clamp here
+// and a refusal on the functions that search is the right division,
+// because evaluation is arithmetic in an inner loop and a `Result`
+// around it would be a `match` nobody reads.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.eval(c, 9.0).x}")   // 2 — clamped
+// ```
+pub fn eval(c: CurveCubic, t: Float) -> CurvePoint []
+    todo("curves-nv.curvecubic.eval")
+
+// The first derivative at a parameter, as a vector.
+//
+// The tangent direction, unnormalised.  Its length is the speed of the
+// parameterisation, which is NOT constant along a Bézier and is why
+// `t_for_length` exists at all.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.derivative(c, 0.5).dx}")   // 2
+// ```
+pub fn derivative(c: CurveCubic, t: Float) -> CurveVec []
+    todo("curves-nv.curvecubic.derivative")
+
+// The second derivative at a parameter.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.second_derivative(c, 0.5).dx}")   // 0
+// ```
+pub fn second_derivative(c: CurveCubic, t: Float) -> CurveVec []
+    todo("curves-nv.curvecubic.second_derivative")
+
+// The derivative as a curve in its own right: a QUADRATIC, exactly.
+//
+// The derivative of a degree-n Bézier is a degree n-1 Bézier over the
+// differences of the control points, scaled by n.  Not an
+// approximation, and the reason `bounds` can be exact: the extrema of
+// the curve are the roots of this, and a quadratic's roots are a
+// formula.
+//
+// Answered as three control points rather than as a `CurveQuad` so
+// that `curvequad` can depend on this module and not the other way
+// round.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 0.0))
+//     println("${curvecubic.derivative_controls(c).0.dx}")   // 3
+// ```
+pub fn derivative_controls(c: CurveCubic) -> (CurveVec, CurveVec, CurveVec) []
+    todo("curves-nv.curvecubic.derivative_controls")
+
+// The unit tangent at a parameter, or `None` at a cusp where the
+// derivative vanishes.
+//
+// `None` rather than a zero vector, because a zero "unit" vector is a
+// value that breaks every caller downstream and a cusp is a real thing
+// a cubic can have.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curvecubic.unit_tangent(c, 0.5)
+//         Some(v) => println("${v.dx}")         // 1
+//         None    => println("a cusp")
+// ```
+pub fn unit_tangent(c: CurveCubic, t: Float) -> ?CurveVec []
+    todo("curves-nv.curvecubic.unit_tangent")
+
+// The unit normal at a parameter: the tangent turned a quarter turn
+// anticlockwise, or `None` at a cusp.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curvecubic.unit_normal(c, 0.5)
+//         Some(v) => println("${v.dy}")         // 1
+//         None    => println("a cusp")
+// ```
+pub fn unit_normal(c: CurveCubic, t: Float) -> ?CurveVec []
+    todo("curves-nv.curvecubic.unit_normal")
+
+// The signed curvature at a parameter: positive where the curve turns
+// anticlockwise.
+//
+// Zero on a straight segment and at an inflection.  What a caller
+// offsetting a stroke, placing a dash or deciding how finely to
+// subdivide actually asks.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.curvature(c, 0.5)}")   // 0
+// ```
+pub fn curvature(c: CurveCubic, t: Float) -> Float []
+    todo("curves-nv.curvecubic.curvature")
+
+// The parameters at which the curve has an inflection: at most two.
+//
+// Where the curvature changes sign.  A stroker has to split there,
+// because an offset curve is not a Bézier across an inflection.
+//
+// ```novo
+// use std.list
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${list.len(curvecubic.inflections(c))}")   // 0
+// ```
+pub fn inflections(c: CurveCubic) -> [Float] []
+    todo("curves-nv.curvecubic.inflections")
+
+// The curve split at a parameter, by de Casteljau.
+//
+// EXACT.  The two halves together are the original curve, they join
+// with the same tangent, and each is a cubic with its own `0 ..= 1`
+// parameterisation.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     let halves = curvecubic.subdivide(c, 0.5)
+//     println("${curvecubic.eval(halves.0, 1.0).x}")   // 1
+// ```
+pub fn subdivide(c: CurveCubic, t: Float) -> (CurveCubic, CurveCubic) []
+    todo("curves-nv.curvecubic.subdivide")
+
+// The piece of the curve between two parameters, reparameterised to
+// `0 ..= 1`.
+//
+// Refuses an inverted range rather than quietly swapping it: a caller
+// whose two parameters came out in the wrong order has a bug upstream
+// and silently reversing the curve hides it.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+//     match curvecubic.segment(c, 0.25, 0.75)
+//         Ok(s)  => println("${curvecubic.eval(s, 0.0).x}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn segment(c: CurveCubic, t0: Float, t1: Float) -> Result<CurveCubic, CurveFault> []
+    todo("curves-nv.curvecubic.segment")
+
+// The curve with its direction reversed.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.eval(curvecubic.reverse(c), 0.0).x}")   // 2
+// ```
+pub fn reverse(c: CurveCubic) -> CurveCubic []
+    todo("curves-nv.curvecubic.reverse")
+
+// The curve under an affine transform.
+//
+// A Bézier is affine-invariant: transforming the four control points
+// transforms the curve exactly, with no resampling.  That is why this
+// takes geometry-nv's `GeomXform` rather than a matrix of its own.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+// use geomxform
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     let moved = curvecubic.transform(c, geomxform.translation(1.0, 0.0))
+//     println("${curvecubic.eval(moved, 0.0).x}")   // 1
+// ```
+pub fn transform(c: CurveCubic, t: GeomXform) -> CurveCubic []
+    todo("curves-nv.curvecubic.transform")
+
+// The length of the curve, to a tolerance.
+//
+// NO CLOSED FORM EXISTS for the arc length of a cubic Bézier, so this
+// is a quadrature — Gauss-Legendre on subdivided pieces — and the
+// tolerance is what says when to stop.  A library that hid it would be
+// choosing the caller's precision, and a caller measuring a path for a
+// plotter and one measuring it for a progress bar want different
+// answers.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+//     match curvecubic.arc_length(c, 1e-6)
+//         Ok(n)  => println("${n}")             // 5
+//         Err(e) => println(e.message())
+// ```
+pub fn arc_length(c: CurveCubic, tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curvecubic.arc_length")
+
+// The parameter at which the curve has covered a given length.
+//
+// THE INVERSE, and the function a caller placing dashes, arrowheads or
+// text along a path needs — because a Bézier's parameter does not move
+// at constant speed, so `t = 0.5` is not the halfway point of the
+// curve and spacing marks by parameter puts them visibly closer
+// together where the curve is tight.
+//
+// `CurveArcLengthOutOfRange` past the end, rather than clamping,
+// because a caller stepping along a path needs to be told it has run
+// off it.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+//     match curvecubic.t_for_length(c, 1.0, 1e-6)
+//         Ok(t)  => println("${t}")             // 0.25
+//         Err(e) => println(e.message())
+// ```
+pub fn t_for_length(c: CurveCubic, length: Float, tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curvecubic.t_for_length")
+
+// The curve as a polyline whose greatest deviation from it is no more
+// than the tolerance.
+//
+// Recursive subdivision against the flatness bound.  The first point
+// is `p0` and the last is `p3`, so consecutive flattened curves join
+// without a gap and without a duplicated point at the join being
+// anybody's problem.
+//
+// `CurveFlattenLimitReached` when the recursion ceiling is hit first:
+// a caller that asked for 1e-12 on a curve the size of a continent did
+// not get it, and being told is better than a polyline that is quietly
+// wrong.
+//
+// ```novo
+// use std.list
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curvecubic.flatten(c, 0.1)
+//         Ok(pts) => println("${list.len(pts) >= 2}")   // true
+//         Err(e)  => println(e.message())
+// ```
+pub fn flatten(c: CurveCubic, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
+    todo("curves-nv.curvecubic.flatten")
+
+// How many straight segments `flatten` would produce, without
+// producing them.
+//
+// What a caller sizing a vertex buffer asks.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curvecubic.flatten_count(c, 0.1)
+//         Ok(n)  => println("${n >= 1}")        // true
+//         Err(e) => println(e.message())
+// ```
+pub fn flatten_count(c: CurveCubic, tolerance: Float) -> Result<Int, CurveFault> []
+    todo("curves-nv.curvecubic.flatten_count")
+
+// The point on the curve nearest a given point.
+//
+// The parameter, the point and the distance together, because a caller
+// that found the nearest point almost always wants to split the curve
+// there and re-deriving the parameter is a second search.
+//
+// Exactly: the condition is a quintic in `t`, whose roots are found
+// numerically to the tolerance.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+//     match curvecubic.nearest_point(c, curvepoint.pt(1.0, 1.0), 1e-6)
+//         Ok(p)  => println("${p.distance}")    // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn nearest_point(c: CurveCubic, to: CurvePoint,
+                     tolerance: Float) -> Result<CurveProjection, CurveFault> []
+    todo("curves-nv.curvecubic.nearest_point")
+
+// The smallest rectangle containing the curve.
+//
+// EXACT, from the roots of the derivative: a cubic's derivative is a
+// quadratic and its roots are a formula, so this costs no iteration
+// and is not an approximation.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+//                              curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+//     println("${curvecubic.bounds(c).height}")   // 0.75, not 1
+// ```
+pub fn bounds(c: CurveCubic) -> CurveRect []
+    todo("curves-nv.curvecubic.bounds")
+
+// The bounding box of the four control points.
+//
+// CHEAP AND NEVER TOO SMALL.  The curve lies inside the convex hull of
+// its control points, so this always contains it and is usually
+// larger — for the S-curve above, 1.0 tall where the exact bound is
+// 0.75.  Both are offered because a broad-phase test over ten thousand
+// curves wants this one and a layout that has to be right wants the
+// other.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+//                              curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+//     println("${curvecubic.hull_bounds(c).height}")   // 1
+// ```
+pub fn hull_bounds(c: CurveCubic) -> CurveRect []
+    todo("curves-nv.curvecubic.hull_bounds")
+
+// Where the curve crosses an infinite line through two points.
+//
+// At most three crossings: the condition is a cubic in `t`.  Each hit
+// carries `line_t` as well, so a caller intersecting with a SEGMENT
+// filters on `0.0 ..= 1.0` rather than measuring again.
+//
+// ```novo
+// use std.list
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(0.0, 1.0))
+//     let hits = curvecubic.intersect_line(c, curvepoint.pt(0.0 - 1.0, 0.0),
+//                                          curvepoint.pt(1.0, 0.0))
+//     println("${list.len(hits)}")              // 1
+// ```
+pub fn intersect_line(c: CurveCubic, a: CurvePoint, b: CurvePoint) -> [CurveHit] []
+    todo("curves-nv.curvecubic.intersect_line")
+
+// Whether the curve is within a tolerance of the straight line from
+// its start to its end.
+//
+// The predicate flattening is built on, public because it is also what
+// a simplifier asks before it replaces a curve with a line.
+//
+// ```novo
+// use curvecubic
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.is_flat(c, 0.01)}")   // true
+// ```
+pub fn is_flat(c: CurveCubic, tolerance: Float) -> Bool []
+    todo("curves-nv.curvecubic.is_flat")

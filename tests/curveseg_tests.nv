@@ -1,0 +1,177 @@
+// curveseg_tests.nv — the union over the four families, and the path
+// operations written once over it.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: curves-nv.curveseg.<fn>`.
+
+use std.test
+use std.list
+use curvefault
+use curvepoint
+use curvecubic
+use curvequad
+use curvearc
+use curveseg
+use geomxform
+
+fn seg_a() -> CurveSegment
+    CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0))
+
+fn seg_b() -> CurveSegment
+    CurveSegLine(curvepoint.pt(1.0, 0.0), curvepoint.pt(2.0, 0.0))
+
+@test
+fn test_every_family_is_a_segment_and_names_itself() [io]
+    test.case("the four kinds")
+    test.assert(curveseg.kind_name(seg_a()) == "line")
+    test.assert(curveseg.kind_name(CurveSegQuad(
+        curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                       curvepoint.pt(2.0, 0.0)))) == "quad")
+    test.assert(curveseg.kind_name(CurveSegCubic(
+        curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0)))) == "cubic")
+    test.assert(curveseg.kind_name(CurveSegArc(
+        curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5))) == "arc")
+
+    test.case("start and end answer without evaluating")
+    test.assert(curveseg.start(seg_a()).x == 0.0)
+    test.assert(curveseg.end(seg_a()).x == 1.0)
+
+@test
+fn test_a_line_is_its_own_segment_because_its_answers_are_formulas() [io]
+    // Running a line through the cubic machinery costs a quadrature, a
+    // root find and a quintic solve to get an answer a first-year
+    // formula gives exactly.  A path is mostly lines.
+    let diag = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+
+    test.case("its length is a subtraction")
+    match curveseg.arc_length(diag, 1e-9)
+        Ok(n)  => test.assert(n == 5.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("its flattening is its two endpoints")
+    match curveseg.flatten(diag, 0.1)
+        Ok(pts) => test.assert(list.len(pts) == 2)
+        Err(e)  => test.fail(e.message())
+
+    test.case("its bounds are its endpoints")
+    test.assert(curveseg.bounds(diag).width == 3.0)
+    test.assert(curveseg.bounds(diag).height == 4.0)
+
+    test.case("and its nearest point is a projection")
+    match curveseg.nearest_point(CurveSegLine(curvepoint.pt(0.0, 0.0),
+                                              curvepoint.pt(4.0, 0.0)),
+                                 curvepoint.pt(2.0, 1.0), 1e-9)
+        Ok(p)  => test.assert(p.distance == 1.0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_generic_operations_dispatch_and_agree_with_the_families() [io]
+    let c = CurveSegCubic(curvecubic.line(curvepoint.pt(0.0, 0.0),
+                                          curvepoint.pt(4.0, 0.0)))
+
+    test.case("eval and derivative")
+    test.assert(curveseg.eval(c, 0.5).x == 2.0)
+    test.assert(curveseg.derivative(c, 0.5).dx == 4.0)
+
+    test.case("subdivision")
+    test.assert(curveseg.end(curveseg.subdivide(c, 0.5).0).x == 2.0)
+
+    test.case("reversal")
+    test.assert(curveseg.start(curveseg.reverse(c)).x == 4.0)
+
+    test.case("transformation")
+    test.assert(curveseg.start(
+        curveseg.transform(c, geomxform.translation(1.0, 0.0))).x == 1.0)
+
+    test.case("and line intersection")
+    let v = CurveSegLine(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(0.0, 1.0))
+    test.assert(list.len(curveseg.intersect_line(v, curvepoint.pt(0.0 - 1.0, 0.0),
+                                                 curvepoint.pt(1.0, 0.0))) == 1)
+
+@test
+fn test_an_arc_stays_an_arc_until_somebody_asks_for_cubics() [io]
+    // Converting to cubics loses the arc, because the conversion is an
+    // approximation in that direction and cannot be undone.
+    test.case("a line, a quadratic and a cubic convert exactly")
+    test.assert(curveseg.cubics_are_exact(seg_a()))
+    test.assert(curveseg.cubics_are_exact(CurveSegQuad(
+        curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                       curvepoint.pt(2.0, 0.0)))))
+    test.assert(curveseg.cubics_are_exact(CurveSegCubic(
+        curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0)))))
+
+    test.case("an arc does not")
+    test.assert(not curveseg.cubics_are_exact(CurveSegArc(
+        curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963))))
+
+    test.case("a line is one cubic and a semicircular arc is two")
+    test.assert(list.len(curveseg.to_cubics(seg_a())) == 1)
+    test.assert(list.len(curveseg.to_cubics(CurveSegArc(
+        curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)))) == 2)
+
+@test
+fn test_a_path_is_a_list_and_the_folds_are_written_once() [io]
+    test.case("a path's length is the sum of its segments'")
+    let diag = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+    match curveseg.path_length([diag, diag], 1e-9)
+        Ok(n)  => test.assert(n == 10.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("an empty path has no length and a zero bounding box")
+    match curveseg.path_length([], 1e-9)
+        Ok(n)  => test.assert(n == 0.0)
+        Err(e) => test.fail(e.message())
+    test.assert(curveseg.path_bounds([]).width == 0.0)
+
+    test.case("a path's bounds cover every segment")
+    test.assert(curveseg.path_bounds([seg_a(), seg_b()]).width == 2.0)
+
+    test.case("flattening a path does NOT repeat the join points")
+    match curveseg.path_flatten([seg_a(), seg_b()], 0.1)
+        Ok(pts) => test.assert(list.len(pts) == 3)
+        Err(e)  => test.fail(e.message())
+
+    test.case("and a tolerance of zero is refused over a path too")
+    match curveseg.path_flatten([seg_a()], 0.0)
+        Ok(_)  => test.fail("that does not terminate")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+@test
+fn test_stepping_a_distance_along_a_path_is_what_places_a_dash() [io]
+    // Spacing marks by parameter instead puts them visibly closer
+    // together wherever the curve is tight.
+    let long = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+
+    test.case("the answer carries which segment it fell in")
+    match curveseg.point_at_distance([long], 1.0, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.0 == 0)
+            test.assert(p.1.x == 1.0)
+
+    test.case("a distance in the second segment names it")
+    match curveseg.point_at_distance([seg_a(), seg_b()], 1.5, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.0 == 1)
+            test.assert(p.1.x == 1.5)
+
+    test.case("and past the end is refused rather than clamped")
+    match curveseg.point_at_distance([long], 99.0, 1e-9)
+        Ok(_)  => test.fail("that is past the end of the path")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+
+@test
+fn test_contiguity_is_the_check_whose_absence_makes_a_fill_leak() [io]
+    test.case("segments that join are contiguous")
+    test.assert(curveseg.is_contiguous([seg_a(), seg_b()], 1e-9))
+
+    test.case("segments that do not are not")
+    let gap = CurveSegLine(curvepoint.pt(5.0, 0.0), curvepoint.pt(6.0, 0.0))
+    test.assert(not curveseg.is_contiguous([seg_a(), gap], 1e-9))
+
+    test.case("a single segment is contiguous with itself")
+    test.assert(curveseg.is_contiguous([seg_a()], 1e-9))
+
+    test.case("and an empty path is vacuously contiguous")
+    test.assert(curveseg.is_contiguous([], 1e-9))

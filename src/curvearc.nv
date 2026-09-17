@@ -1,0 +1,393 @@
+// curvearc.nv — the elliptical arc, in both of the two
+// parameterisations, and the conversion between them.
+//
+// TWO PARAMETERISATIONS, AND EVERY PROGRAM NEEDS BOTH
+//
+// SVG's path syntax describes an arc by where it ENDS: `A rx ry
+// rotation large-arc sweep x y`, which says "an ellipse of these radii,
+// tilted this much, from where I am to there, and here are two flags
+// saying which of the four possible arcs I mean".  That is the right
+// shape for a path, because a path is a sequence of moves and every
+// other command ends somewhere.
+//
+// Everything that draws, measures or hit-tests an arc needs the CENTRE
+// instead: the centre, the radii, the tilt, the starting angle and the
+// swept angle.  There is no way to evaluate a point on an endpoint arc
+// without computing the centre first.
+//
+// So both are here, `to_center` and `to_endpoint` convert, and the
+// conversion is the SVG specification's own Appendix B.2.  It is the
+// piece of arc code that everybody writes once and gets wrong once: the
+// radii may need scaling up when the given ones are too small to reach,
+// and the flags pick between four arcs in a way that is not symmetric.
+//
+// AN ARC IS NOT A BÉZIER AND NEVER WILL BE
+//
+// A circular arc is not a polynomial, so no Bézier is equal to one.
+// `to_cubics` approximates, splitting at 90 degrees or less and
+// answering as many cubics as that takes; the error of the standard
+// approximation is about one part in 40000 of the radius per 90-degree
+// piece, which is below a pixel for any radius under about 20000.
+// `flatten` goes straight to a polyline and is exact to its tolerance,
+// because a point on an arc IS a closed form.
+
+use curvepoint
+use geomxform
+
+// An arc as SVG's path syntax describes it: where it ends.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 1.0, 1.0, 0.0,
+//                                   false, true, curvepoint.pt(2.0, 0.0))
+//     println("${a.rx}")                        // 1
+// ```
+pub struct CurveArcEndpoint
+    // Where the arc starts.
+    from: CurvePoint
+    // The radius along the ellipse's first axis, before the tilt.
+    rx: Float
+    // The radius along its second axis.
+    ry: Float
+    // How far the ellipse is tilted, in radians.
+    rotation: Float
+    // Which of the two arcs between the endpoints to take: the one
+    // sweeping more than half a turn, or the one sweeping less.
+    large_arc: Bool
+    // Which direction to sweep in.  True is the direction of
+    // increasing angle, which on a screen coordinate system looks
+    // clockwise.
+    sweep: Bool
+    // Where the arc ends.
+    to: CurvePoint
+
+// The same arc as everything that draws one needs it: the centre.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvearc.center_arc(curvepoint.pt(1.0, 0.0), 1.0, 1.0, 0.0, 3.14159, 3.14159)
+//     println("${c.sweep_angle > 0.0}")         // true
+// ```
+pub struct CurveArcCenter
+    // The ellipse's centre.
+    center: CurvePoint
+    // The radius along the first axis, before the tilt.  Never
+    // smaller than the endpoints require: the conversion scales both
+    // radii up together when the given ones cannot reach.
+    rx: Float
+    // The radius along the second axis.
+    ry: Float
+    // The tilt, in radians.
+    rotation: Float
+    // Where on the ellipse the arc starts, in radians before the tilt
+    // is applied.
+    start_angle: Float
+    // How far it sweeps, in radians.  Negative for an
+    // anticlockwise arc, so the sign carries the direction and there
+    // is no separate flag to disagree with it.
+    sweep_angle: Float
+
+// An arc in the endpoint parameterisation.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0,
+//                                   true, false, curvepoint.pt(4.0, 0.0))
+//     println("${a.large_arc}")                 // true
+// ```
+pub fn endpoint_arc(from: CurvePoint, rx: Float, ry: Float, rotation: Float, large_arc: Bool,
+                    sweep: Bool, to: CurvePoint) -> CurveArcEndpoint []
+    todo("curves-nv.curvearc.endpoint_arc")
+
+// An arc in the centre parameterisation.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvearc.center_arc(curvepoint.pt(0.0, 0.0), 1.0, 1.0, 0.0, 0.0, 1.57)
+//     println("${c.rx}")                        // 1
+// ```
+pub fn center_arc(center: CurvePoint, rx: Float, ry: Float, rotation: Float, start_angle: Float,
+                  sweep_angle: Float) -> CurveArcCenter []
+    todo("curves-nv.curvearc.center_arc")
+
+// A whole ellipse as one arc: a full turn from angle zero.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let e = curvearc.ellipse(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0)
+//     println("${curvearc.is_full_turn(e)}")    // true
+// ```
+pub fn ellipse(center: CurvePoint, rx: Float, ry: Float, rotation: Float) -> CurveArcCenter []
+    todo("curves-nv.curvearc.ellipse")
+
+// A circular arc: an ellipse whose radii are equal and whose tilt is
+// therefore irrelevant.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+//     println("${a.ry}")                        // 1
+// ```
+pub fn circular(center: CurvePoint, radius: Float, start_angle: Float,
+                sweep_angle: Float) -> CurveArcCenter []
+    todo("curves-nv.curvearc.circular")
+
+// The endpoint arc as a centre arc: SVG Appendix B.2.2.
+//
+// THE CONVERSION EVERYBODY GETS WRONG ONCE.  Two things happen in it
+// that are not obvious from the formula: radii too small to reach
+// between the endpoints are SCALED UP TOGETHER by the factor that makes
+// them just reach, which SVG requires and which silently changes the
+// shape a caller asked for; and the two flags select among four arcs in
+// a way that is not symmetric, so swapping the endpoints of an arc does
+// not simply negate the sweep.
+//
+// `CurveRadiusNotPositive` when a radius is zero or negative.  SVG's own
+// rule is to draw a straight line instead, which is right for a
+// renderer and wrong for a library asked for an arc — a caller that
+// wanted the line can write one.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 0.0, 1.0, 0.0,
+//                                   false, true, curvepoint.pt(2.0, 0.0))
+//     match curvearc.to_center(a)
+//         Ok(_)  => println("this cannot happen — rx is zero")
+//         Err(e) => println(e.message())
+// ```
+pub fn to_center(a: CurveArcEndpoint) -> Result<CurveArcCenter, CurveFault> []
+    todo("curves-nv.curvearc.to_center")
+
+// The centre arc as an endpoint arc: SVG Appendix B.2.1.
+//
+// The direction that loses nothing, and the one a path writer uses.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+//     println("${curvearc.to_endpoint(c).sweep}")   // true
+// ```
+pub fn to_endpoint(a: CurveArcCenter) -> CurveArcEndpoint []
+    todo("curves-nv.curvearc.to_endpoint")
+
+// Whether the arc sweeps a full turn or more.
+//
+// The case the endpoint parameterisation cannot express at all — its
+// two endpoints coincide, so SVG says draw nothing — and the reason a
+// full ellipse in a path is always two arcs.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     println("${curvearc.is_full_turn(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.0))}")
+// ```
+pub fn is_full_turn(a: CurveArcCenter) -> Bool []
+    todo("curves-nv.curvearc.is_full_turn")
+
+// The point at a parameter, `0.0` at the start and `1.0` at the end.
+//
+// EXACT: a point on an ellipse is a cosine and a sine, so this is a
+// closed form and not an approximation.  The parameter moves at
+// constant ANGULAR speed, which is not constant speed along the curve
+// unless the ellipse is a circle.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     println("${curvearc.eval(a, 0.0).x}")     // 1
+// ```
+pub fn eval(a: CurveArcCenter, t: Float) -> CurvePoint []
+    todo("curves-nv.curvearc.eval")
+
+// The derivative at a parameter, as a vector.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     println("${curvearc.derivative(a, 0.0).dx}")   // 0
+// ```
+pub fn derivative(a: CurveArcCenter, t: Float) -> CurveVec []
+    todo("curves-nv.curvearc.derivative")
+
+// The point at an angle on the ellipse, before the sweep is
+// considered.
+//
+// The other way in, for a caller placing a label at a compass bearing
+// or building an ellipse from a set of angles.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let e = curvearc.ellipse(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0)
+//     println("${curvearc.point_at_angle(e, 0.0).x}")   // 2
+// ```
+pub fn point_at_angle(a: CurveArcCenter, radians: Float) -> CurvePoint []
+    todo("curves-nv.curvearc.point_at_angle")
+
+// The length of the arc, to a tolerance.
+//
+// NO CLOSED FORM EXISTS for an ellipse's arc length — it is the
+// complete elliptic integral of the second kind, which is why the
+// circumference of an ellipse has no formula and Ramanujan's is famous
+// for being a good approximation.  A circular arc is the exception and
+// is answered exactly.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     match curvearc.arc_length(a, 1e-9)
+//         Ok(n)  => println("${n}")             // pi
+//         Err(e) => println(e.message())
+// ```
+pub fn arc_length(a: CurveArcCenter, tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curvearc.arc_length")
+
+// The arc split at a parameter.
+//
+// Exact, and cheaper than a Bézier's: the two halves share the centre
+// and the radii, and only the angles change.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     println("${curvearc.subdivide(a, 0.5).0.sweep_angle < 2.0}")   // true
+// ```
+pub fn subdivide(a: CurveArcCenter, t: Float) -> (CurveArcCenter, CurveArcCenter) []
+    todo("curves-nv.curvearc.subdivide")
+
+// The arc as a polyline within a tolerance of it.
+//
+// EXACT TO ITS TOLERANCE, because a point on an arc is a closed form:
+// the step is chosen from the sagitta of a chord, not by recursive
+// subdivision against a flatness bound.
+//
+// ```novo
+// use std.list
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     match curvearc.flatten(a, 0.01)
+//         Ok(pts) => println("${list.len(pts) >= 2}")
+//         Err(e)  => println(e.message())
+// ```
+pub fn flatten(a: CurveArcCenter, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
+    todo("curves-nv.curvearc.flatten")
+
+// The arc as cubic Béziers.
+//
+// AN APPROXIMATION, always: a circular arc is not a polynomial, so no
+// Bézier equals one.  The arc is split into pieces of at most 90
+// degrees and each is approximated by the standard construction, whose
+// greatest error is about one part in 40000 of the radius — below a
+// pixel for any radius under about 20000.
+//
+// A caller that needs the exact shape flattens instead, or keeps the
+// arc.
+//
+// ```novo
+// use std.list
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     println("${list.len(curvearc.to_cubics(a))}")   // 2 — half a turn is two pieces
+// ```
+pub fn to_cubics(a: CurveArcCenter) -> [CurveCubic] []
+    todo("curves-nv.curvearc.to_cubics")
+
+// The greatest distance between the arc and the cubics `to_cubics`
+// answers.
+//
+// So that a caller converting for a renderer can check the
+// approximation against its own tolerance instead of trusting a number
+// in a comment.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+//     println("${curvearc.cubic_error(a) < 0.001}")   // true
+// ```
+pub fn cubic_error(a: CurveArcCenter) -> Float []
+    todo("curves-nv.curvearc.cubic_error")
+
+// The smallest rectangle containing the arc.
+//
+// Exact, and NOT the ellipse's own bounding box: an arc that sweeps a
+// quarter turn is bounded by its endpoints and whichever axis extremes
+// fall inside the sweep.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+//     println("${a.rx - curvearc.bounds(a).width < 0.001}")   // true
+// ```
+pub fn bounds(a: CurveArcCenter) -> CurveRect []
+    todo("curves-nv.curvearc.bounds")
+
+// The arc under an affine transform.
+//
+// An ellipse under an affine map is an ellipse, so this is exact — but
+// the RADII AND THE TILT BOTH CHANGE, and a non-uniform scale turns a
+// circle into a tilted ellipse.  That is why it answers a whole arc
+// rather than scaling the radii in place.
+//
+// ```novo
+// use curvearc
+// use curvepoint
+// use geomxform
+//
+// fn main() [io]
+//     let a = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+//     println("${curvearc.transform(a, geomxform.scaling(2.0, 1.0)).rx}")   // 2
+// ```
+pub fn transform(a: CurveArcCenter, t: GeomXform) -> CurveArcCenter []
+    todo("curves-nv.curvearc.transform")

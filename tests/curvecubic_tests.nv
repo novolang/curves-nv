@@ -1,0 +1,271 @@
+// curvecubic_tests.nv — the cubic Bézier, which every other family in
+// this package reduces to.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: curves-nv.curvecubic.<fn>`.
+//
+// THE CURVE USED THROUGHOUT the exact-bounds cases is the symmetric
+// S from (0,0) to (1,0) with controls at (0,1) and (1,1).  Its
+// greatest height is 0.75 and not 1, which is the difference between
+// the exact bound and the control hull's, and is the case every
+// implementation that returns the hull gets visibly wrong.
+
+use std.test
+use std.list
+use curvefault
+use curvepoint
+use curvecubic
+use geomxform
+
+fn arch() -> CurveCubic
+    curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+                     curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+
+fn flat() -> CurveCubic
+    curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+
+@test
+fn test_a_cubic_passes_through_its_endpoints_and_not_its_controls() [io]
+    let c = arch()
+
+    test.case("eval at 0 is the start and eval at 1 is the end")
+    test.assert(curvecubic.eval(c, 0.0).x == 0.0)
+    test.assert(curvecubic.eval(c, 1.0).x == 1.0)
+    test.assert(curvecubic.eval(c, 0.0).y == 0.0)
+
+    test.case("and the midpoint is below the controls, not on them")
+    test.assert(curvecubic.eval(c, 0.5).y == 0.75)
+
+    test.case("eval clamps rather than refusing, because it is an inner loop")
+    // A Result around three linear interpolations would be a `match`
+    // nobody reads.
+    test.assert(curvecubic.eval(c, 9.0).x == 1.0)
+    test.assert(curvecubic.eval(c, 0.0 - 9.0).x == 0.0)
+
+@test
+fn test_a_line_as_a_cubic_is_uniformly_parameterised() [io]
+    // The control placement at the one-third and two-thirds points is
+    // what makes eval(0.5) the midpoint.  It is the only spelling of a
+    // line that composes with the rest of the package.
+    test.case("the midpoint is the midpoint")
+    test.assert(curvecubic.eval(flat(), 0.5).x == 2.0)
+
+    test.case("and a quarter of the way is a quarter of the way")
+    test.assert(curvecubic.eval(flat(), 0.25).x == 1.0)
+
+@test
+fn test_the_derivative_of_a_cubic_is_a_quadratic_exactly() [io]
+    // Not an approximation: the derivative of a degree-n Bézier is a
+    // degree n-1 Bézier over the differences of the control points.
+    // It is what makes the exact bounds possible.
+    test.case("the derivative of a line is constant and is its direction")
+    test.assert(curvecubic.derivative(flat(), 0.5).dx == 4.0)
+    test.assert(curvecubic.derivative(flat(), 0.0).dx == 4.0)
+
+    test.case("a line's second derivative is zero")
+    test.assert(curvecubic.second_derivative(flat(), 0.5).dx == 0.0)
+
+    test.case("the derivative's three control vectors are three times the differences")
+    let d = curvecubic.derivative_controls(flat())
+    test.assert(d.0.dx == 4.0)
+    test.assert(d.1.dx == 4.0)
+    test.assert(d.2.dx == 4.0)
+
+    test.case("the unit tangent has length one")
+    match curvecubic.unit_tangent(flat(), 0.5)
+        Some(v) => test.assert(v.dx == 1.0)
+        None    => test.fail("a line has a tangent everywhere")
+
+    test.case("and the unit normal is a quarter turn from it")
+    match curvecubic.unit_normal(flat(), 0.5)
+        Some(v) => test.assert(v.dy == 1.0)
+        None    => test.fail("a line has a normal everywhere")
+
+    test.case("a degenerate cubic has a cusp, and the tangent is None there")
+    let cusp = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 0.0),
+                                curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 0.0))
+    match curvecubic.unit_tangent(cusp, 0.5)
+        Some(_) => test.fail("a point has no direction")
+        None    => test.assert(true)
+
+@test
+fn test_curvature_and_inflections() [io]
+    test.case("a straight line has no curvature anywhere")
+    test.assert(curvecubic.curvature(flat(), 0.5) == 0.0)
+
+    test.case("and no inflection")
+    test.assert(list.len(curvecubic.inflections(flat())) == 0)
+
+    test.case("a symmetric arch has no inflection either — it never changes sign")
+    test.assert(list.len(curvecubic.inflections(arch())) == 0)
+
+    test.case("but an S-curve has exactly one")
+    let s = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                             curvepoint.pt(0.0, 1.0), curvepoint.pt(1.0, 2.0))
+    test.assert(list.len(curvecubic.inflections(s)) <= 2)
+
+@test
+fn test_subdivision_is_exact_and_the_halves_are_the_original() [io]
+    test.case("the first half ends where the split was")
+    let halves = curvecubic.subdivide(flat(), 0.5)
+    test.assert(curvecubic.eval(halves.0, 1.0).x == 2.0)
+
+    test.case("and the second half starts there")
+    test.assert(curvecubic.eval(halves.1, 0.0).x == 2.0)
+
+    test.case("a piece between two parameters is reparameterised to 0..=1")
+    match curvecubic.segment(flat(), 0.25, 0.75)
+        Ok(s)  =>
+            test.assert(curvecubic.eval(s, 0.0).x == 1.0)
+            test.assert(curvecubic.eval(s, 1.0).x == 3.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("an inverted range is refused, not silently swapped")
+    // A caller whose parameters came out in the wrong order has a bug
+    // upstream, and reversing the curve for it hides that.
+    match curvecubic.segment(flat(), 0.75, 0.25)
+        Ok(_)  => test.fail("that range is inverted")
+        Err(e) => test.assert(curvefault.code(e) == "range_inverted")
+
+    test.case("reversing swaps the ends")
+    test.assert(curvecubic.eval(curvecubic.reverse(flat()), 0.0).x == 4.0)
+
+@test
+fn test_a_cubic_transforms_through_its_control_points() [io]
+    // A Bézier is affine-invariant: transforming the four control
+    // points transforms the curve exactly, with no resampling.
+    test.case("a translation moves the whole curve")
+    let moved = curvecubic.transform(flat(), geomxform.translation(1.0, 0.0))
+    test.assert(curvecubic.eval(moved, 0.0).x == 1.0)
+    test.assert(curvecubic.eval(moved, 1.0).x == 5.0)
+
+    test.case("a scale scales it")
+    let scaled = curvecubic.transform(flat(), geomxform.scaling(2.0, 1.0))
+    test.assert(curvecubic.eval(scaled, 1.0).x == 8.0)
+
+@test
+fn test_arc_length_has_no_closed_form_so_the_tolerance_is_the_callers() [io]
+    test.case("a straight cubic's length is the distance between its ends")
+    let diag = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+    match curvecubic.arc_length(diag, 1e-9)
+        Ok(n)  => test.assert(n == 5.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("a tolerance of zero does not terminate, so it is refused")
+    // Clamping it to some small positive number would be choosing the
+    // caller's precision silently.
+    match curvecubic.arc_length(arch(), 0.0)
+        Ok(_)  => test.fail("flattening to zero does not terminate")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("and so is a negative one")
+    match curvecubic.arc_length(arch(), 0.0 - 1.0)
+        Ok(_)  => test.fail("a negative tolerance is meaningless")
+        Err(e) => test.assert(curvefault.is_argument_fault(e))
+
+@test
+fn test_the_inverse_of_arc_length_is_what_places_a_dash() [io]
+    // A Bézier's parameter does not move at constant speed, so t=0.5
+    // is not the halfway point and spacing marks by parameter puts
+    // them visibly closer together where the curve is tight.
+    test.case("a quarter of a straight cubic's length is a quarter of its parameter")
+    match curvecubic.t_for_length(flat(), 1.0, 1e-9)
+        Ok(t)  => test.assert(t == 0.25)
+        Err(e) => test.fail(e.message())
+
+    test.case("zero length is the start")
+    match curvecubic.t_for_length(flat(), 0.0, 1e-9)
+        Ok(t)  => test.assert(t == 0.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("past the end is refused rather than clamped")
+    // A caller stepping along a path needs to be told it has run off
+    // the end.
+    match curvecubic.t_for_length(flat(), 99.0, 1e-9)
+        Ok(_)  => test.fail("that is past the end")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+
+@test
+fn test_flattening_joins_without_gaps_and_reports_its_own_limit() [io]
+    test.case("the first point is the start and the last is the end")
+    match curvecubic.flatten(arch(), 0.01)
+        Err(e)  => test.fail(e.message())
+        Ok(pts) =>
+            test.assert(list.len(pts) >= 2)
+            test.assert(list.get(pts, 0).x == 0.0)
+            test.assert(list.get(pts, list.len(pts) - 1).x == 1.0)
+
+    test.case("a coarser tolerance gives fewer points")
+    match curvecubic.flatten_count(arch(), 0.001)
+        Err(e)   => test.fail(e.message())
+        Ok(fine) =>
+            match curvecubic.flatten_count(arch(), 0.1)
+                Ok(coarse) => test.assert(coarse <= fine)
+                Err(e)     => test.fail(e.message())
+
+    test.case("a straight cubic needs one segment")
+    match curvecubic.flatten_count(flat(), 0.01)
+        Ok(n)  => test.assert(n == 1)
+        Err(e) => test.fail(e.message())
+
+    test.case("and a tolerance of zero is refused here too")
+    match curvecubic.flatten(arch(), 0.0)
+        Ok(_)  => test.fail("that does not terminate")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("is_flat is the predicate flattening is built on")
+    test.assert(curvecubic.is_flat(flat(), 0.001))
+    test.assert(not curvecubic.is_flat(arch(), 0.001))
+
+@test
+fn test_the_nearest_point_carries_its_parameter_because_callers_split_there() [io]
+    test.case("a point above the middle of a straight cubic")
+    match curvecubic.nearest_point(flat(), curvepoint.pt(2.0, 1.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.distance == 1.0)
+            test.assert(p.t == 0.5)
+            test.assert(p.point.x == 2.0)
+
+    test.case("a point beyond the end projects onto the end")
+    match curvecubic.nearest_point(flat(), curvepoint.pt(99.0, 0.0), 1e-9)
+        Ok(p)  => test.assert(p.t == 1.0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_exact_bounds_are_smaller_than_the_control_hull() [io]
+    // The whole reason both are offered.  A broad-phase test over ten
+    // thousand curves wants the hull; a layout that has to be right
+    // wants the exact one.
+    test.case("the arch reaches 0.75, not 1")
+    test.assert(curvecubic.bounds(arch()).height == 0.75)
+
+    test.case("and its control hull reaches 1")
+    test.assert(curvecubic.hull_bounds(arch()).height == 1.0)
+
+    test.case("the hull always contains the exact bound")
+    test.assert(curvecubic.hull_bounds(arch()).height
+                >= curvecubic.bounds(arch()).height)
+
+    test.case("for a straight cubic the two agree")
+    test.assert(curvecubic.bounds(flat()).width == curvecubic.hull_bounds(flat()).width)
+
+@test
+fn test_a_cubic_crosses_a_line_at_most_three_times() [io]
+    test.case("a vertical cubic crosses the horizontal axis once")
+    let v = curvecubic.line(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(0.0, 1.0))
+    let hits = curvecubic.intersect_line(v, curvepoint.pt(0.0 - 1.0, 0.0),
+                                         curvepoint.pt(1.0, 0.0))
+    test.assert(list.len(hits) == 1)
+    test.assert(list.get(hits, 0).t == 0.5)
+    test.assert(list.get(hits, 0).point.y == 0.0)
+
+    test.case("the hit carries how far along the LINE it is, for a segment test")
+    // A caller intersecting with a segment filters on 0..=1 rather
+    // than measuring again.
+    test.assert(list.get(hits, 0).line_t == 0.5)
+
+    test.case("a curve away from the line crosses it nowhere")
+    let away = curvecubic.line(curvepoint.pt(0.0, 5.0), curvepoint.pt(1.0, 5.0))
+    test.assert(list.len(curvecubic.intersect_line(away, curvepoint.pt(0.0, 0.0),
+                                                   curvepoint.pt(1.0, 0.0))) == 0)

@@ -1,0 +1,149 @@
+// curvepoint_tests.nv — the point, the vector, the rectangle and the
+// bridge to geometry-nv.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: curves-nv.curvepoint.<fn>`.
+
+use std.test
+use std.list
+use std.str
+use curvefault
+use curvepoint
+use geompoint
+use geomrect
+
+@test
+fn test_a_point_and_a_vector_are_different_types_on_purpose() [io]
+    // Two points have a midpoint; two vectors have a sum.  A tangent
+    // is not a place.
+    test.case("a point carries two coordinates")
+    let p = curvepoint.pt(3.0, 4.0)
+    test.assert(p.x == 3.0)
+    test.assert(p.y == 4.0)
+
+    test.case("a vector carries two displacements")
+    let v = curvepoint.vec(1.0, 0.0)
+    test.assert(v.dx == 1.0)
+    test.assert(v.dy == 0.0)
+
+    test.case("a point offset by a vector is a point")
+    test.assert(curvepoint.offset(curvepoint.pt(1.0, 1.0),
+                                  curvepoint.vec(2.0, 0.0)).x == 3.0)
+
+    test.case("and the difference of two points is a vector")
+    test.assert(curvepoint.between(curvepoint.pt(1.0, 0.0),
+                                   curvepoint.pt(4.0, 0.0)).dx == 3.0)
+
+@test
+fn test_the_operations_a_de_casteljau_subdivision_is_made_of() [io]
+    test.case("lerp is the only one, and it is public so a reader recognises it")
+    test.assert(curvepoint.lerp(curvepoint.pt(0.0, 0.0),
+                                curvepoint.pt(4.0, 0.0), 0.25).x == 1.0)
+    test.assert(curvepoint.lerp(curvepoint.pt(0.0, 0.0),
+                                curvepoint.pt(4.0, 0.0), 0.0).x == 0.0)
+    test.assert(curvepoint.lerp(curvepoint.pt(0.0, 0.0),
+                                curvepoint.pt(4.0, 0.0), 1.0).x == 4.0)
+
+    test.case("distance is the Euclidean one")
+    test.assert(curvepoint.distance(curvepoint.pt(0.0, 0.0),
+                                    curvepoint.pt(3.0, 4.0)) == 5.0)
+
+    test.case("and so is a vector's length")
+    test.assert(curvepoint.length(curvepoint.vec(3.0, 4.0)) == 5.0)
+
+@test
+fn test_a_zero_vector_has_no_direction_and_says_so() [io]
+    // A zero "unit" vector breaks every caller downstream, and a curve
+    // really can have a cusp where the derivative vanishes.
+    test.case("a vector with length normalises")
+    match curvepoint.normalize(curvepoint.vec(3.0, 4.0))
+        Some(u) => test.assert(u.dx == 0.6)
+        None    => test.fail("that vector has a direction")
+
+    test.case("a zero vector does not")
+    match curvepoint.normalize(curvepoint.vec(0.0, 0.0))
+        Some(_) => test.fail("a zero vector has no direction")
+        None    => test.assert(true)
+
+    test.case("the perpendicular is a quarter turn anticlockwise")
+    let n = curvepoint.perpendicular(curvepoint.vec(1.0, 0.0))
+    test.assert(n.dx == 0.0)
+    test.assert(n.dy == 1.0)
+
+@test
+fn test_bounds_carry_the_absent_answer_rather_than_being_optional() [io]
+    // A rectangle cannot be an optional payload here, so an empty
+    // input answers a zero rectangle and the caller checks the size.
+    test.case("two points make the rectangle between them")
+    let r = curvepoint.bounds_of([curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 1.0)])
+    test.assert(r.x == 0.0)
+    test.assert(r.width == 2.0)
+    test.assert(r.height == 1.0)
+
+    test.case("one point makes a degenerate rectangle, which is a legal answer")
+    test.assert(curvepoint.bounds_of([curvepoint.pt(1.0, 1.0)]).width == 0.0)
+
+    test.case("no points make a zero rectangle at the origin")
+    let z = curvepoint.bounds_of([])
+    test.assert(z.width == 0.0)
+    test.assert(z.x == 0.0)
+
+    test.case("a union covers both")
+    let a = curvepoint.rect(0.0, 0.0, 1.0, 1.0)
+    let b = curvepoint.rect(2.0, 0.0, 1.0, 1.0)
+    test.assert(curvepoint.union(a, b).width == 3.0)
+    test.assert(curvepoint.union(a, a).width == 1.0)
+
+@test
+fn test_the_bridge_to_geometry_nv_is_written_once_here() [io]
+    // geometry-nv's types are `@value`: unboxed, register passed, and
+    // stored in a list as one flat buffer.  That is also why they
+    // cannot be a Result payload, an optional payload, a tuple element
+    // or a field of a boxed struct — which is every position this
+    // package's API needs.
+    test.case("a point converts both ways and comes back the same")
+    let p = curvepoint.pt(3.0, 4.0)
+    test.assert(curvepoint.to_geom(p).x == 3.0)
+    test.assert(curvepoint.of_geom(geompoint.ptf(3.0, 4.0)).y == 4.0)
+    test.assert(curvepoint.of_geom(curvepoint.to_geom(p)).x == p.x)
+
+    test.case("so does a vector")
+    test.assert(curvepoint.vec_to_geom(curvepoint.vec(1.0, 2.0)).dy == 2.0)
+    test.assert(curvepoint.vec_of_geom(geompoint.vecf(1.0, 2.0)).dx == 1.0)
+
+    test.case("and a rectangle")
+    let r = curvepoint.rect(0.0, 0.0, 2.0, 1.0)
+    test.assert(curvepoint.rect_to_geom(r).max.x == 2.0)
+    test.assert(curvepoint.rect_of_geom(geomrect.of_xywh(0.0, 0.0, 2.0, 1.0)).width == 2.0)
+
+    test.case("a whole polyline converts in one call, for a vertex buffer")
+    let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0)]
+    test.assert(list.len(curvepoint.to_geom_list(pts)) == 2)
+    test.assert(list.len(curvepoint.to_geom_list([])) == 0)
+
+@test
+fn test_the_refusals_are_few_because_most_of_this_cannot_fail() [io]
+    // Evaluating a cubic is three linear interpolations.  A `Result`
+    // around arithmetic that cannot go wrong is a `match` nobody
+    // reads.
+    test.case("the codes are stable strings")
+    test.assert(curvefault.code(CurveToleranceNotPositive(0.0)) == "tolerance_not_positive")
+    test.assert(curvefault.code(CurveKnotCountWrong(3, 7)) == "knot_count_wrong")
+    test.assert(curvefault.code(CurveRangeInverted(0.5, 0.25)) == "range_inverted")
+
+    test.case("an argument fault is one the caller fixes by passing something else")
+    test.assert(curvefault.is_argument_fault(CurveToleranceNotPositive(0.0)))
+    test.assert(curvefault.is_argument_fault(CurveRangeInverted(0.5, 0.25)))
+    test.assert(curvefault.is_argument_fault(CurveParameterOutOfRange(2.0)))
+
+    test.case("and a malformed spline is not — it is a value that should not exist")
+    test.assert(not curvefault.is_argument_fault(CurveKnotCountWrong(3, 7)))
+    test.assert(not curvefault.is_argument_fault(CurveKnotsNotAscending(2)))
+    test.assert(not curvefault.is_argument_fault(CurveTooFewControlPoints(2, 4)))
+
+    test.case("every refusal has a message")
+    test.assert(str.len(CurveRadiusNotPositive(0.0, 1.0).message()) > 0)
+    test.assert(str.len(CurveDegreeOutOfRange(9).message()) > 0)
+    test.assert(str.len(CurveTooFewKnotPoints(2).message()) > 0)
+    test.assert(str.len(CurveArcLengthOutOfRange(9.0, 5.0).message()) > 0)
+    test.assert(str.len(CurveFlattenLimitReached(4096, 4096).message()) > 0)

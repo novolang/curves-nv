@@ -1,0 +1,302 @@
+// curvefamily_tests.nv — the quadratic, the arc and the two splines:
+// what each one has that a cubic does not.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: curves-nv.<module>.<fn>`.
+
+use std.test
+use std.list
+use curvefault
+use curvepoint
+use curvecubic
+use curvequad
+use curvearc
+use curvespline
+use geomxform
+
+fn hump() -> CurveQuad
+    curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                   curvepoint.pt(2.0, 0.0))
+
+fn straight() -> CurveQuad
+    curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0),
+                   curvepoint.pt(4.0, 0.0))
+
+fn knots() -> [CurvePoint]
+    [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0), curvepoint.pt(2.0, 0.0),
+     curvepoint.pt(3.0, 1.0), curvepoint.pt(4.0, 0.0)]
+
+@test
+fn test_a_quadratic_has_a_closed_form_arc_length_and_that_is_why_it_exists() [io]
+    // The cubic's integrand has no closed form and is a quadrature
+    // with a tolerance.  The quadratic's integrates to a logarithm.
+    test.case("arc_length takes NO tolerance and is exact")
+    test.assert(curvequad.arc_length(straight()) == 4.0)
+
+    test.case("the second derivative is constant, so a quadratic has no inflection")
+    test.assert(curvequad.second_derivative(hump()).dy == 0.0 - 4.0)
+
+    test.case("eval, derivative and curvature behave like the cubic's")
+    test.assert(curvequad.eval(straight(), 0.5).x == 2.0)
+    test.assert(curvequad.derivative(straight(), 0.5).dx == 4.0)
+    test.assert(curvequad.curvature(straight(), 0.5) == 0.0)
+    match curvequad.unit_tangent(straight(), 0.5)
+        Some(v) => test.assert(v.dx == 1.0)
+        None    => test.fail("a straight quadratic has a tangent")
+
+    test.case("the inverse of arc length still takes a stopping tolerance")
+    match curvequad.t_for_length(straight(), 1.0, 1e-9)
+        Ok(t)  => test.assert(t == 0.25)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_quadratics_own_operations() [io]
+    test.case("subdivision and segments, as for the cubic")
+    test.assert(curvequad.eval(curvequad.subdivide(straight(), 0.5).0, 1.0).x == 2.0)
+    match curvequad.segment(straight(), 0.75, 0.25)
+        Ok(_)  => test.fail("that range is inverted")
+        Err(e) => test.assert(curvefault.code(e) == "range_inverted")
+
+    test.case("reversing swaps the ends")
+    test.assert(curvequad.eval(curvequad.reverse(straight()), 0.0).x == 4.0)
+
+    test.case("transforming goes through the control points")
+    test.assert(curvequad.eval(
+        curvequad.transform(straight(), geomxform.translation(1.0, 0.0)), 0.0).x == 1.0)
+
+    test.case("flattening joins at the endpoints")
+    match curvequad.flatten(hump(), 0.01)
+        Ok(pts) => test.assert(list.len(pts) >= 2)
+        Err(e)  => test.fail(e.message())
+
+    test.case("the exact bound is half the control hull's height for this hump")
+    test.assert(curvequad.bounds(hump()).height == 0.5)
+    test.assert(curvequad.hull_bounds(hump()).height == 1.0)
+
+    test.case("nearest point, as for the cubic but over a cubic condition")
+    match curvequad.nearest_point(straight(), curvepoint.pt(2.0, 1.0), 1e-9)
+        Ok(p)  => test.assert(p.distance == 1.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("and at most two line crossings, not three")
+    let v = curvequad.quad(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(1.0, 0.0),
+                           curvepoint.pt(0.0, 1.0))
+    test.assert(list.len(curvequad.intersect_line(v, curvepoint.pt(0.0 - 1.0, 0.0),
+                                                  curvepoint.pt(1.0, 0.0))) <= 2)
+
+@test
+fn test_degree_elevation_is_exact_and_the_other_direction_is_not() [io]
+    test.case("a quadratic as a cubic is the same curve at the same parameter")
+    test.assert(curvecubic.eval(curvequad.to_cubic(hump()), 0.5).y
+                == curvequad.eval(hump(), 0.5).y)
+    test.assert(curvecubic.eval(curvequad.to_cubic(hump()), 0.0).x == 0.0)
+
+    test.case("a cubic as a quadratic answers the error, because it is an approximation")
+    // A cubic has an inflection a quadratic cannot have, so the answer
+    // can be arbitrarily wrong and a caller that did not look would
+    // not know.
+    let line = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+    test.assert(curvequad.of_cubic(line).1 == 0.0)
+    test.assert(curvequad.of_cubic(line).0.p0.x == 0.0)
+
+@test
+fn test_an_arc_has_two_parameterisations_and_every_program_needs_both() [io]
+    // SVG's path syntax says where an arc ENDS.  Everything that
+    // draws, measures or hit-tests one needs the CENTRE.
+    test.case("a semicircle in the endpoint form converts to the centre form")
+    let e = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 1.0, 1.0, 0.0,
+                                  false, true, curvepoint.pt(2.0, 0.0))
+    match curvearc.to_center(e)
+        Err(x) => test.fail(x.message())
+        Ok(c)  =>
+            test.assert(c.center.x == 1.0)
+            test.assert(c.rx == 1.0)
+
+    test.case("and back again")
+    let c = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+    test.assert(curvearc.to_endpoint(c).rx == 1.0)
+
+    test.case("a centre arc can also be written directly, tilt and all")
+    let tilted = curvearc.center_arc(curvepoint.pt(1.0, 2.0), 3.0, 1.0,
+                                     0.7853982, 0.0, 1.5707963)
+    test.assert(tilted.center.y == 2.0)
+    test.assert(tilted.rotation > 0.0)
+    test.assert(tilted.sweep_angle > 0.0)
+
+    test.case("a zero radius is refused, not turned into a line")
+    // SVG's own rule is to draw a line, which is right for a renderer
+    // and wrong for a library asked for an arc.
+    let bad = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 0.0, 1.0, 0.0,
+                                    false, true, curvepoint.pt(2.0, 0.0))
+    match curvearc.to_center(bad)
+        Ok(_)  => test.fail("rx is zero")
+        Err(x) => test.assert(curvefault.code(x) == "radius_not_positive")
+
+    test.case("a full turn cannot be written in the endpoint form at all")
+    test.assert(curvearc.is_full_turn(curvearc.ellipse(curvepoint.pt(0.0, 0.0),
+                                                       2.0, 1.0, 0.0)))
+    test.assert(not curvearc.is_full_turn(c))
+
+@test
+fn test_an_arc_evaluates_exactly_and_converts_to_cubics_approximately() [io]
+    let semi = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 3.1415927)
+
+    test.case("a point on an ellipse is a cosine and a sine, so eval is exact")
+    test.assert(curvearc.eval(semi, 0.0).x == 1.0)
+    test.assert(curvearc.derivative(semi, 0.0).dx == 0.0)
+    test.assert(curvearc.point_at_angle(curvearc.ellipse(curvepoint.pt(0.0, 0.0),
+                                                          2.0, 1.0, 0.0),
+                                                          0.0).x == 2.0)
+
+    test.case("a circular arc's length is exact; an ellipse's is a quadrature")
+    match curvearc.arc_length(semi, 1e-9)
+        Ok(n)  => test.assert(n > 3.14)
+        Err(x) => test.fail(x.message())
+
+    test.case("subdivision splits the sweep and keeps the centre")
+    test.assert(curvearc.subdivide(semi, 0.5).0.center.x == 0.0)
+
+    test.case("flattening is exact to its tolerance, because eval is a closed form")
+    match curvearc.flatten(semi, 0.01)
+        Ok(pts) => test.assert(list.len(pts) >= 2)
+        Err(x)  => test.fail(x.message())
+
+    test.case("to_cubics is an APPROXIMATION and says how large its error is")
+    // A circular arc is not a polynomial, so no Bézier equals one.
+    test.assert(list.len(curvearc.to_cubics(semi)) == 2)
+    test.assert(curvearc.cubic_error(semi) < 0.001)
+
+    test.case("the bounds of a quarter arc are not the ellipse's own box")
+    let quarter = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.5707963)
+    test.assert(curvearc.bounds(quarter).width <= 1.0)
+
+    test.case("and a non-uniform scale turns a circle into an ellipse")
+    test.assert(curvearc.transform(quarter, geomxform.scaling(2.0, 1.0)).rx == 2.0)
+
+@test
+fn test_a_bspline_approximates_and_a_catmull_rom_interpolates() [io]
+    test.case("a clamped B-spline starts and ends at its outer controls")
+    match curvespline.clamped_bspline(knots(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            test.assert(curvespline.eval(b, 0.0).x == 0.0)
+            test.assert(curvespline.eval(b, 1.0).x == 4.0)
+            test.assert(b.degree == 3)
+
+    test.case("an unclamped one starts inside the control polygon")
+    match curvespline.uniform_bspline(knots(), 3)
+        Ok(b)  => test.assert(curvespline.eval(b, 0.0).x > 0.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("a Catmull-Rom spline passes THROUGH its knots")
+    match curvespline.catmull_rom(knots())
+        Ok(s)  => test.assert(curvespline.catmull_eval(s, 0.0).x == 1.0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_spline_refusals_each_name_what_was_wrong() [io]
+    test.case("a knot vector of the wrong length")
+    match curvespline.bspline(knots(), 3, [0.0, 1.0])
+        Ok(_)  => test.fail("five controls at degree three need nine knots")
+        Err(e) => test.assert(curvefault.code(e) == "knot_count_wrong")
+
+    test.case("too few control points for the degree")
+    match curvespline.clamped_bspline([curvepoint.pt(0.0, 0.0),
+                                       curvepoint.pt(1.0, 0.0)],
+                                       3)
+        Ok(_)  => test.fail("two points cannot carry degree three")
+        Err(e) => test.assert(curvefault.code(e) == "too_few_control_points")
+
+    test.case("a degree outside 1 to 7")
+    match curvespline.clamped_bspline(knots(), 9)
+        Ok(_)  => test.fail("nothing in 2-D drawing uses degree nine")
+        Err(e) => test.assert(curvefault.code(e) == "degree_out_of_range")
+
+    test.case("and a Catmull-Rom with fewer than four points")
+    match curvespline.catmull_rom([curvepoint.pt(0.0, 0.0)])
+        Ok(_)  => test.fail("the basis needs four")
+        Err(e) => test.assert(curvefault.code(e) == "too_few_knot_points")
+
+@test
+fn test_centripetal_is_the_default_because_it_cannot_cusp() [io]
+    // The uniform formulation — which is what "Catmull-Rom" means in
+    // most libraries — cusps and self-intersects on points that are
+    // close together and then far apart.  Centripetal is proved never
+    // to (Yuksel et al., 2011).
+    test.case("the three rules and their exponents")
+    test.assert(curvespline.alpha_name(CurveAlphaUniform) == "uniform")
+    test.assert(curvespline.alpha_name(CurveAlphaCentripetal) == "centripetal")
+    test.assert(curvespline.alpha_name(CurveAlphaChordal) == "chordal")
+    test.assert(curvespline.alpha_exponent(CurveAlphaUniform) == 0.0)
+    test.assert(curvespline.alpha_exponent(CurveAlphaCentripetal) == 0.5)
+    test.assert(curvespline.alpha_exponent(CurveAlphaChordal) == 1.0)
+
+    test.case("the plain constructor is centripetal")
+    match curvespline.catmull_rom(knots())
+        Ok(s)  => test.assert(curvespline.alpha_name(s.alpha) == "centripetal")
+        Err(e) => test.fail(e.message())
+
+    test.case("and it cannot cusp, whatever the points")
+    match curvespline.catmull_rom(knots())
+        Ok(s)  => test.assert(not curvespline.may_self_intersect(s))
+        Err(e) => test.fail(e.message())
+
+    test.case("the other two can, and a caller choosing one is told")
+    match curvespline.catmull_rom_with(knots(), CurveAlphaUniform)
+        Ok(s)  => test.assert(curvespline.may_self_intersect(s))
+        Err(e) => test.fail(e.message())
+    match curvespline.catmull_rom_with(knots(), CurveAlphaChordal)
+        Ok(s)  => test.assert(curvespline.may_self_intersect(s))
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_both_splines_reduce_to_cubics_exactly() [io]
+    // A change of basis, not an approximation: a cubic B-spline
+    // segment IS a cubic Bézier with its controls computed from four
+    // consecutive B-spline controls.
+    test.case("a five-control cubic B-spline has two segments")
+    match curvespline.clamped_bspline(knots(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            test.assert(curvespline.segment_count(b) == 2)
+            test.assert(list.len(curvespline.to_cubics(b)) == 2)
+
+    test.case("a five-knot Catmull-Rom has two cubics")
+    match curvespline.catmull_rom(knots())
+        Ok(s)  => test.assert(list.len(curvespline.catmull_to_cubics(s)) == 2)
+        Err(e) => test.fail(e.message())
+
+    test.case("the clamped knot vector is controls + degree + 1 long")
+    test.assert(list.len(curvespline.clamped_knots(5, 3)) == 9)
+    test.assert(list.len(curvespline.clamped_knots(4, 3)) == 8)
+
+@test
+fn test_moving_one_control_changes_the_curve_only_near_it() [io]
+    // The operation a B-spline exists for.
+    test.case("a control affects at most degree + 1 segments")
+    match curvespline.clamped_bspline(knots(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  => test.assert(list.len(curvespline.affected_segments(b, 1)) <= 4)
+
+    test.case("moving it answers a new spline")
+    match curvespline.clamped_bspline(knots(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            match curvespline.move_control(b, 1, curvepoint.pt(1.0, 5.0))
+                Ok(m)  => test.assert(curvespline.eval(m, 0.25).y > 0.0)
+                Err(e) => test.fail(e.message())
+
+    test.case("and an index past the end is refused")
+    match curvespline.clamped_bspline(knots(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            match curvespline.move_control(b, 99, curvepoint.pt(0.0, 0.0))
+                Ok(_)  => test.fail("there is no control 99")
+                Err(e) => test.assert(curvefault.is_argument_fault(e))
+
+    test.case("the derivative of a flat spline is flat")
+    match curvespline.clamped_bspline([curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+                                       curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 0.0)],
+                                       3)
+        Ok(b)  => test.assert(curvespline.derivative(b, 0.5).dy == 0.0)
+        Err(e) => test.fail(e.message())

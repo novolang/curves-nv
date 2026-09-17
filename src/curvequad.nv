@@ -1,0 +1,360 @@
+// curvequad.nv — the quadratic Bézier: one control point, and an arc
+// length that has a closed form.
+//
+// WHY A SEPARATE TYPE WHEN EVERY QUADRATIC IS A CUBIC
+//
+// It is, exactly: raising the degree of a quadratic gives a cubic whose
+// curve is the same curve, and `to_cubic` is that formula.  So a
+// quadratic could be a cubic with its controls in particular places,
+// and the type could be deleted.
+//
+// Two things are lost if it is.  A TrueType glyph is quadratics — the
+// whole font format is — and a caller that converted every one of them
+// to a cubic on the way in would spend a third more memory on a page
+// of text and would never convert back, because the conversion is
+// exact one way and an approximation the other.
+//
+// And the arc length of a quadratic HAS A CLOSED FORM: the integrand is
+// the square root of a quadratic, which integrates to a logarithm.  The
+// cubic's does not, and is a quadrature with a tolerance.  So
+// `arc_length` here takes no tolerance and answers an exact number,
+// which is a different function with a different signature, and folding
+// the type away would fold that away too.
+
+use curvepoint
+use curvecubic
+use geomxform
+
+// A quadratic Bézier: a start, one control and an end.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(q, 0.5).y}")    // 0.5
+// ```
+pub struct CurveQuad
+    // Where the curve starts.
+    p0: CurvePoint
+    // The control point.  The curve does not pass through it; the
+    // tangents at both ends point at it.
+    p1: CurvePoint
+    // Where the curve ends.
+    p2: CurvePoint
+
+// A quadratic from three points.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(q, 1.0).x}")    // 2
+// ```
+pub fn quad(p0: CurvePoint, p1: CurvePoint, p2: CurvePoint) -> CurveQuad []
+    todo("curves-nv.curvequad.quad")
+
+// The point at a parameter.  Clamps, like the cubic's.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(q, 0.5).x}")    // 1
+// ```
+pub fn eval(q: CurveQuad, t: Float) -> CurvePoint []
+    todo("curves-nv.curvequad.eval")
+
+// The first derivative at a parameter.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.derivative(q, 0.5).dx}")   // 2
+// ```
+pub fn derivative(q: CurveQuad, t: Float) -> CurveVec []
+    todo("curves-nv.curvequad.derivative")
+
+// The second derivative, which is CONSTANT along a quadratic.
+//
+// Not a convenience: it is why a quadratic has no inflection and why
+// its flatness bound is a single subtraction rather than a maximum over
+// the curve.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.second_derivative(q).dy}")   // -4
+// ```
+pub fn second_derivative(q: CurveQuad) -> CurveVec []
+    todo("curves-nv.curvequad.second_derivative")
+
+// The signed curvature at a parameter.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.curvature(q, 0.5)}")   // 0
+// ```
+pub fn curvature(q: CurveQuad, t: Float) -> Float []
+    todo("curves-nv.curvequad.curvature")
+
+// The unit tangent at a parameter, or `None` at a cusp.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     match curvequad.unit_tangent(q, 0.5)
+//         Some(v) => println("${v.dx}")         // 1
+//         None    => println("a cusp")
+// ```
+pub fn unit_tangent(q: CurveQuad, t: Float) -> ?CurveVec []
+    todo("curves-nv.curvequad.unit_tangent")
+
+// The curve split at a parameter, by de Casteljau.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(curvequad.subdivide(q, 0.5).0, 1.0).x}")   // 1
+// ```
+pub fn subdivide(q: CurveQuad, t: Float) -> (CurveQuad, CurveQuad) []
+    todo("curves-nv.curvequad.subdivide")
+
+// The piece between two parameters, reparameterised to `0 ..= 1`.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0),
+//                            curvepoint.pt(4.0, 0.0))
+//     match curvequad.segment(q, 0.5, 0.25)
+//         Ok(_)  => println("this cannot happen — the range is inverted")
+//         Err(e) => println(e.message())
+// ```
+pub fn segment(q: CurveQuad, t0: Float, t1: Float) -> Result<CurveQuad, CurveFault> []
+    todo("curves-nv.curvequad.segment")
+
+// The curve with its direction reversed.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(curvequad.reverse(q), 0.0).x}")   // 2
+// ```
+pub fn reverse(q: CurveQuad) -> CurveQuad []
+    todo("curves-nv.curvequad.reverse")
+
+// The curve under an affine transform, exactly.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+// use geomxform
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.eval(curvequad.transform(q, geomxform.translation(1.0, 0.0)), 0.0).x}")
+// ```
+pub fn transform(q: CurveQuad, t: GeomXform) -> CurveQuad []
+    todo("curves-nv.curvequad.transform")
+
+// The length of the curve.  EXACT, and no tolerance.
+//
+// The integrand is the square root of a quadratic in the parameter,
+// which integrates to a logarithm.  The cubic's does not, which is why
+// `curvecubic.arc_length` takes a tolerance and this does not — and is
+// most of the reason this type exists rather than being a cubic with
+// its controls in particular places.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.arc_length(q)}")     // 2
+// ```
+pub fn arc_length(q: CurveQuad) -> Float []
+    todo("curves-nv.curvequad.arc_length")
+
+// The parameter at which the curve has covered a given length.
+//
+// Newton iteration over the closed form, so the tolerance is the
+// caller's stopping rule and not an integration error.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0),
+//                            curvepoint.pt(4.0, 0.0))
+//     match curvequad.t_for_length(q, 1.0, 1e-9)
+//         Ok(t)  => println("${t}")             // 0.25
+//         Err(e) => println(e.message())
+// ```
+pub fn t_for_length(q: CurveQuad, length: Float, tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curvequad.t_for_length")
+
+// The curve as a polyline within a tolerance of it.
+//
+// ```novo
+// use std.list
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     match curvequad.flatten(q, 0.01)
+//         Ok(pts) => println("${list.len(pts) >= 2}")
+//         Err(e)  => println(e.message())
+// ```
+pub fn flatten(q: CurveQuad, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
+    todo("curves-nv.curvequad.flatten")
+
+// The point on the curve nearest a given point.
+//
+// The condition is a CUBIC in the parameter rather than the cubic
+// curve's quintic, so this needs no iteration beyond the cubic root
+// formula and the tolerance only decides how near two roots may be
+// before they are treated as one.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0),
+//                            curvepoint.pt(4.0, 0.0))
+//     match curvequad.nearest_point(q, curvepoint.pt(2.0, 1.0), 1e-9)
+//         Ok(p)  => println("${p.distance}")    // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn nearest_point(q: CurveQuad, to: CurvePoint,
+                     tolerance: Float) -> Result<CurveProjection, CurveFault> []
+    todo("curves-nv.curvequad.nearest_point")
+
+// The smallest rectangle containing the curve.  Exact: the derivative
+// is linear, so its root is a division.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 2.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.bounds(q).height}")   // 1, not 2
+// ```
+pub fn bounds(q: CurveQuad) -> CurveRect []
+    todo("curves-nv.curvequad.bounds")
+
+// The bounding box of the three control points.
+//
+// ```novo
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 2.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.hull_bounds(q).height}")   // 2
+// ```
+pub fn hull_bounds(q: CurveQuad) -> CurveRect []
+    todo("curves-nv.curvequad.hull_bounds")
+
+// Where the curve crosses an infinite line through two points.  At
+// most two crossings.
+//
+// ```novo
+// use std.list
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(1.0, 0.0),
+//                            curvepoint.pt(0.0, 1.0))
+//     println("${list.len(curvequad.intersect_line(q, curvepoint.pt(0.0 - 1.0, 0.0),
+//                                                  curvepoint.pt(1.0, 0.0)))}")
+// ```
+pub fn intersect_line(q: CurveQuad, a: CurvePoint, b: CurvePoint) -> [CurveHit] []
+    todo("curves-nv.curvequad.intersect_line")
+
+// The same curve as a cubic.  EXACT.
+//
+// Degree elevation: the cubic's controls are the quadratic's start and
+// end with the control point weighted two thirds into each.  The curve
+// is the same curve and the parameterisation is the same
+// parameterisation.
+//
+// ```novo
+// use curvecubic
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let q = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                            curvepoint.pt(2.0, 0.0))
+//     println("${curvecubic.eval(curvequad.to_cubic(q), 0.5).y}")   // 0.5
+// ```
+pub fn to_cubic(q: CurveQuad) -> CurveCubic []
+    todo("curves-nv.curvequad.to_cubic")
+
+// A cubic's nearest quadratic, and how far apart they are.
+//
+// THE OTHER DIRECTION IS AN APPROXIMATION, which is why it answers the
+// error as well as the curve: a cubic has an inflection a quadratic
+// cannot have, so the answer can be arbitrarily wrong and a caller that
+// did not look at the number would not know.  A font tool converting
+// PostScript outlines to TrueType splits the cubic first and calls this
+// on the pieces.
+//
+// ```novo
+// use curvecubic
+// use curvequad
+// use curvepoint
+//
+// fn main() [io]
+//     let c = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curvequad.of_cubic(c).1}")     // 0 — a line is exactly a quadratic
+// ```
+pub fn of_cubic(c: CurveCubic) -> (CurveQuad, Float) []
+    todo("curves-nv.curvequad.of_cubic")

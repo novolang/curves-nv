@@ -1,0 +1,374 @@
+// curveseg.nv — one type over the four families, so that a path can be
+// a list.
+//
+// WHY A SUM TYPE AT ALL
+//
+// A path is a sequence of pieces of different kinds: a line here, a
+// cubic there, an arc where the designer used the ellipse tool.  A
+// caller that had to keep four parallel lists, or convert everything to
+// cubics on the way in, would be paying for the union anyway and would
+// have lost the arc — which cannot be recovered from cubics, because
+// the conversion is an approximation in that direction.
+//
+// So `CurveSegment` is the union, every function here dispatches on it,
+// and the arcs stay arcs until somebody asks for cubics.
+//
+// WHAT THE UNION COSTS AND WHY IT IS WORTH IT
+//
+// `eval` on a `CurveSegment` is a match and then the family's own
+// `eval`, so an inner loop that knows its type should call that one
+// directly.  What the union buys is that `arc_length`, `flatten`,
+// `bounds` and `nearest_point` over a whole path are one fold, written
+// once, instead of four.
+//
+// A LINE IS A SEGMENT OF ITS OWN
+//
+// `curvecubic.line` exists and produces a cubic that is exactly a
+// straight line, and `CurveLine` is here anyway — because the arc
+// length of a line is a subtraction, its bounds are its endpoints, its
+// nearest point is a projection, and running any of those through the
+// cubic machinery costs a quadrature, a root find and a quintic solve
+// to get an answer a first-year formula gives exactly.  A path is
+// mostly lines.
+
+use curvepoint
+use curvecubic
+use geomxform
+
+// One piece of a path.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     println(curveseg.kind_name(CurveSegLine(curvepoint.pt(0.0, 0.0),
+//                                             curvepoint.pt(1.0, 0.0))))
+// ```
+pub enum CurveSegment
+    // A straight line from one point to another.
+    CurveSegLine(from: CurvePoint, to: CurvePoint)
+    // A quadratic Bézier.
+    CurveSegQuad(curve: CurveQuad)
+    // A cubic Bézier.
+    CurveSegCubic(curve: CurveCubic)
+    // An elliptical arc, in the centre parameterisation, because that
+    // is the one every operation needs.
+    CurveSegArc(curve: CurveArcCenter)
+
+// The family's name: `"line"`, `"quad"`, `"cubic"`, `"arc"`.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     println(curveseg.kind_name(CurveSegLine(curvepoint.pt(0.0, 0.0),
+//                                             curvepoint.pt(1.0, 0.0))))
+// ```
+pub fn kind_name(s: CurveSegment) -> Str []
+    todo("curves-nv.curveseg.kind_name")
+
+// Where the segment starts.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(1.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.start(s).x}")         // 1
+// ```
+pub fn start(s: CurveSegment) -> CurvePoint []
+    todo("curves-nv.curveseg.start")
+
+// Where the segment ends.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(1.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.end(s).x}")           // 2
+// ```
+pub fn end(s: CurveSegment) -> CurvePoint []
+    todo("curves-nv.curveseg.end")
+
+// The point at a parameter.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.eval(s, 0.5).x}")     // 1
+// ```
+pub fn eval(s: CurveSegment, t: Float) -> CurvePoint []
+    todo("curves-nv.curveseg.eval")
+
+// The derivative at a parameter.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.derivative(s, 0.5).dx}")   // 2
+// ```
+pub fn derivative(s: CurveSegment, t: Float) -> CurveVec []
+    todo("curves-nv.curveseg.derivative")
+
+// The segment's length, to a tolerance.
+//
+// The tolerance is ignored for a line and a quadratic, both of which
+// have closed forms, and is the quadrature's stopping rule for a cubic
+// and an ellipse.  It is still an argument, because a caller folding
+// over a path of mixed kinds cannot know which it will meet.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+//     match curveseg.arc_length(s, 1e-9)
+//         Ok(n)  => println("${n}")             // 5
+//         Err(e) => println(e.message())
+// ```
+pub fn arc_length(s: CurveSegment, tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curveseg.arc_length")
+
+// The segment as a polyline within a tolerance of it.
+//
+// The first point is the segment's start and the last is its end, so
+// the flattened pieces of a path join without gaps.
+//
+// ```novo
+// use std.list
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curveseg.flatten(s, 0.1)
+//         Ok(pts) => println("${list.len(pts)}")   // 2
+//         Err(e)  => println(e.message())
+// ```
+pub fn flatten(s: CurveSegment, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
+    todo("curves-nv.curveseg.flatten")
+
+// The smallest rectangle containing the segment.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 1.0))
+//     println("${curveseg.bounds(s).width}")    // 2
+// ```
+pub fn bounds(s: CurveSegment) -> CurveRect []
+    todo("curves-nv.curveseg.bounds")
+
+// The point on the segment nearest a given point.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+//     match curveseg.nearest_point(s, curvepoint.pt(2.0, 1.0), 1e-9)
+//         Ok(p)  => println("${p.distance}")    // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn nearest_point(s: CurveSegment, to: CurvePoint,
+                     tolerance: Float) -> Result<CurveProjection, CurveFault> []
+    todo("curves-nv.curveseg.nearest_point")
+
+// Where the segment crosses an infinite line through two points.
+//
+// ```novo
+// use std.list
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0 - 1.0), curvepoint.pt(0.0, 1.0))
+//     println("${list.len(curveseg.intersect_line(s, curvepoint.pt(0.0 - 1.0, 0.0),
+//                                                 curvepoint.pt(1.0, 0.0)))}")   // 1
+// ```
+pub fn intersect_line(s: CurveSegment, a: CurvePoint, b: CurvePoint) -> [CurveHit] []
+    todo("curves-nv.curveseg.intersect_line")
+
+// The segment split at a parameter.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.end(curveseg.subdivide(s, 0.5).0).x}")   // 1
+// ```
+pub fn subdivide(s: CurveSegment, t: Float) -> (CurveSegment, CurveSegment) []
+    todo("curves-nv.curveseg.subdivide")
+
+// The segment with its direction reversed.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.start(curveseg.reverse(s)).x}")   // 2
+// ```
+pub fn reverse(s: CurveSegment) -> CurveSegment []
+    todo("curves-nv.curveseg.reverse")
+
+// The segment under an affine transform.
+//
+// Exact for every family: a Bézier transforms through its control
+// points and an ellipse under an affine map is an ellipse.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+// use geomxform
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.start(curveseg.transform(s, geomxform.translation(1.0, 0.0))).x}")
+// ```
+pub fn transform(s: CurveSegment, t: GeomXform) -> CurveSegment []
+    todo("curves-nv.curveseg.transform")
+
+// The segment as cubic Béziers.
+//
+// Exact for a line, a quadratic and a cubic; an APPROXIMATION for an
+// arc, which is why the arc stays an arc until this is called.
+//
+// ```novo
+// use std.list
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${list.len(curveseg.to_cubics(s))}")   // 1
+// ```
+pub fn to_cubics(s: CurveSegment) -> [CurveCubic] []
+    todo("curves-nv.curveseg.to_cubics")
+
+// Whether converting this segment to cubics is exact.
+//
+// False for an arc alone.  The predicate a path simplifier asks before
+// it flattens everything to cubics and throws the originals away.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let s = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.cubics_are_exact(s)}")   // true
+// ```
+pub fn cubics_are_exact(s: CurveSegment) -> Bool []
+    todo("curves-nv.curveseg.cubics_are_exact")
+
+// The length of a whole sequence of segments.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let a = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+//     match curveseg.path_length([a, a], 1e-9)
+//         Ok(n)  => println("${n}")             // 10
+//         Err(e) => println(e.message())
+// ```
+pub fn path_length(segments: [CurveSegment], tolerance: Float) -> Result<Float, CurveFault> []
+    todo("curves-nv.curveseg.path_length")
+
+// The smallest rectangle containing a whole sequence of segments.
+//
+// A zero rectangle at the origin for an empty sequence — the answer a
+// rectangle has to carry, since there is no absent rectangle.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let a = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 1.0))
+//     println("${curveseg.path_bounds([a]).width}")   // 2
+// ```
+pub fn path_bounds(segments: [CurveSegment]) -> CurveRect []
+    todo("curves-nv.curveseg.path_bounds")
+
+// A whole sequence of segments as one polyline.
+//
+// The join points are not repeated: each segment after the first
+// contributes its points from the second onwards, because its first is
+// the previous segment's last.
+//
+// ```novo
+// use std.list
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let a = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0))
+//     let b = CurveSegLine(curvepoint.pt(1.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     match curveseg.path_flatten([a, b], 0.1)
+//         Ok(pts) => println("${list.len(pts)}")   // 3, not 4
+//         Err(e)  => println(e.message())
+// ```
+pub fn path_flatten(segments: [CurveSegment],
+                    tolerance: Float) -> Result<[CurvePoint], CurveFault> []
+    todo("curves-nv.curveseg.path_flatten")
+
+// The point a given distance along a sequence of segments, and which
+// segment it fell in.
+//
+// WHAT PLACES A DASH, AN ARROWHEAD OR A LETTER ON A PATH.  Spacing
+// marks by parameter instead puts them visibly closer together
+// wherever the curve is tight, because a Bézier's parameter does not
+// move at constant speed.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let a = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+//     match curveseg.point_at_distance([a], 1.0, 1e-9)
+//         Ok(p)  => println("${p.1.x}")         // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn point_at_distance(segments: [CurveSegment], distance: Float,
+                         tolerance: Float) -> Result<(Int, CurvePoint), CurveFault> []
+    todo("curves-nv.curveseg.point_at_distance")
+
+// Whether the sequence's segments join end to start, within a
+// tolerance.
+//
+// The check a caller does before it treats a path as a closed region,
+// and the one whose absence produces a fill that leaks.
+//
+// ```novo
+// use curveseg
+// use curvepoint
+//
+// fn main() [io]
+//     let a = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0))
+//     let b = CurveSegLine(curvepoint.pt(1.0, 0.0), curvepoint.pt(2.0, 0.0))
+//     println("${curveseg.is_contiguous([a, b], 1e-9)}")   // true
+// ```
+pub fn is_contiguous(segments: [CurveSegment], tolerance: Float) -> Bool []
+    todo("curves-nv.curveseg.is_contiguous")

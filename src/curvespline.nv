@@ -1,0 +1,434 @@
+// curvespline.nv — the two splines that go through, or near, a list of
+// points.
+//
+// THE DIFFERENCE BETWEEN THEM IS THE WHOLE CHOICE
+//
+// A B-spline APPROXIMATES its control points: the curve is pulled
+// towards them and passes through none of them unless the knot vector
+// is clamped at the ends.  Moving one control point changes the curve
+// only near it, which is what makes a B-spline the right thing for a
+// designer dragging handles.
+//
+// A Catmull-Rom spline INTERPOLATES: it passes through every one of its
+// knot points.  That is what an animator wants, because the points are
+// where the object has to be, and it is what a chart wants, because the
+// points are measurements.
+//
+// So neither is a better version of the other, and a package that
+// shipped one would be a package half its callers could not use.
+//
+// THE ALPHA PARAMETER, WHICH IS NOT A STYLE SETTING
+//
+// Catmull-Rom comes in three flavours that differ in how the parameter
+// is spaced between knots, and the difference is not cosmetic:
+//
+//   uniform      spacing 1 between every pair.  The original, and it
+//                CUSPS AND SELF-INTERSECTS when two knots are close
+//                together and the next is far away.
+//   centripetal  spacing by the square root of the distance.  Proved
+//                (Yuksel et al., 2011) never to cusp or self-intersect,
+//                for any arrangement of points whatever.
+//   chordal      spacing by the distance.  Smoother-looking on evenly
+//                spread points, and it overshoots on uneven ones.
+//
+// Centripetal is the one to use unless there is a reason, which is why
+// `catmull_rom` is centripetal and the other two are asked for by name.
+//
+// BOTH REDUCE TO CUBICS, AND THAT IS HOW THEY ARE MEASURED
+//
+// Every segment of a cubic B-spline and every segment of a Catmull-Rom
+// spline IS a cubic Bézier in a different basis, exactly.  So
+// `to_cubics` is a change of basis and not an approximation, and arc
+// length, nearest point and flattening are `curvecubic`'s, applied
+// piece by piece.
+
+use curvepoint
+
+// How a Catmull-Rom spline spaces its parameter between knots.
+//
+// ```novo
+// use curvespline
+//
+// fn main() [io]
+//     println(curvespline.alpha_name(CurveAlphaCentripetal))
+// ```
+pub enum CurveAlpha
+    // Spacing 1 between every pair of knots.  The original
+    // formulation, and it cusps and self-intersects on unevenly spaced
+    // points.
+    CurveAlphaUniform
+    // Spacing by the square root of the distance between knots.
+    // Proved never to cusp or self-intersect, whatever the points.
+    CurveAlphaCentripetal
+    // Spacing by the distance between knots.  Smoother on evenly
+    // spread points and it overshoots on uneven ones.
+    CurveAlphaChordal
+
+// A B-spline: control points, a degree, and a knot vector.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Ok(b)  => println("${b.degree}")      // 3
+//         Err(e) => println(e.message())
+// ```
+pub struct CurveBspline
+    // The control points.  The curve is pulled towards them and passes
+    // through none of them, except the first and last when the knot
+    // vector is clamped.
+    controls: [CurvePoint]
+    // The degree: 1 is a polyline, 2 is quadratic, 3 is cubic.  Three
+    // is what almost everything uses.
+    degree: Int
+    // The knot vector, non-decreasing, `controls + degree + 1` long.
+    // Where the knots are is what decides how much of the curve each
+    // control point affects.
+    knots: [Float]
+
+// A Catmull-Rom spline: the points it passes through, and the spacing
+// rule.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.catmull_rom(pts)
+//         Ok(s)  => println(curvespline.alpha_name(s.alpha))
+//         Err(e) => println(e.message())
+// ```
+pub struct CurveCatmull
+    // The points the curve passes through, in order.  At least four:
+    // the basis needs a point on each side of every segment, so the
+    // first and last are tangent handles rather than curve.
+    points: [CurvePoint]
+    // How the parameter is spaced between them.
+    alpha: CurveAlpha
+
+// The spacing rule's name: `"uniform"`, `"centripetal"`, `"chordal"`.
+//
+// ```novo
+// use curvespline
+//
+// fn main() [io]
+//     println(curvespline.alpha_name(CurveAlphaChordal))   // chordal
+// ```
+pub fn alpha_name(a: CurveAlpha) -> Str []
+    todo("curves-nv.curvespline.alpha_name")
+
+// The exponent a spacing rule is: 0, 0.5, 1.
+//
+// The number the formulation is actually parameterised by, so that a
+// caller reading a paper recognises what it is looking at.
+//
+// ```novo
+// use curvespline
+//
+// fn main() [io]
+//     println("${curvespline.alpha_exponent(CurveAlphaCentripetal)}")   // 0.5
+// ```
+pub fn alpha_exponent(a: CurveAlpha) -> Float []
+    todo("curves-nv.curvespline.alpha_exponent")
+
+// A B-spline with a knot vector the caller supplies.
+//
+// Refuses a knot count that does not match, a knot vector that falls,
+// a degree outside 1 to 7, and fewer control points than the degree
+// needs — each naming what was wrong, because a malformed spline that
+// was accepted would evaluate to nonsense somewhere far away.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0)]
+//     match curvespline.bspline(pts, 3, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+//         Ok(_)  => println("this cannot happen — two points cannot carry degree 3")
+//         Err(e) => println(e.message())
+// ```
+pub fn bspline(controls: [CurvePoint], degree: Int,
+               knots: [Float]) -> Result<CurveBspline, CurveFault> []
+    todo("curves-nv.curvespline.bspline")
+
+// A B-spline with the knot vector that clamps it to its endpoints.
+//
+// The ordinary one: the first and last knots are repeated
+// `degree + 1` times, which makes the curve start exactly at the first
+// control point and end exactly at the last.  An unclamped spline
+// starts somewhere inside the control polygon, which surprises
+// everybody once.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Ok(b)  => println("${curvespline.eval(b, 0.0).x}")   // 0
+//         Err(e) => println(e.message())
+// ```
+pub fn clamped_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspline, CurveFault> []
+    todo("curves-nv.curvespline.clamped_bspline")
+
+// A B-spline with a uniform knot vector.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.uniform_bspline(pts, 3)
+//         Ok(b)  => println("${b.degree}")      // 3
+//         Err(e) => println(e.message())
+// ```
+pub fn uniform_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspline, CurveFault> []
+    todo("curves-nv.curvespline.uniform_bspline")
+
+// The point at a parameter, `0.0` at the start of the spline's domain
+// and `1.0` at its end.
+//
+// Normalised rather than in knot units, so that a caller stepping
+// along the whole spline does not have to read the knot vector to know
+// where to start.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Ok(b)  => println("${curvespline.eval(b, 1.0).x}")   // 3
+//         Err(e) => println(e.message())
+// ```
+pub fn eval(b: CurveBspline, t: Float) -> CurvePoint []
+    todo("curves-nv.curvespline.eval")
+
+// The derivative at a parameter.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 0.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Ok(b)  => println("${curvespline.derivative(b, 0.5).dy}")   // 0
+//         Err(e) => println(e.message())
+// ```
+pub fn derivative(b: CurveBspline, t: Float) -> CurveVec []
+    todo("curves-nv.curvespline.derivative")
+
+// How many cubic segments the spline has.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Ok(b)  => println("${curvespline.segment_count(b)}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn segment_count(b: CurveBspline) -> Int []
+    todo("curves-nv.curvespline.segment_count")
+
+// The spline as cubic Béziers.  EXACT for degree 3.
+//
+// A change of basis, not an approximation: a cubic B-spline segment IS
+// a cubic Bézier with its control points computed from four
+// consecutive B-spline controls.  A spline of another degree is
+// subdivided to cubics first, which IS an approximation, and
+// `CurveDegreeOutOfRange` is not the refusal for it — the README says
+// which degrees are exact.
+//
+// ```novo
+// use std.list
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Err(e) => println(e.message())
+//         Ok(b)  => println("${list.len(curvespline.to_cubics(b))}")   // 1
+// ```
+pub fn to_cubics(b: CurveBspline) -> [CurveCubic] []
+    todo("curves-nv.curvespline.to_cubics")
+
+// The knot vector a clamped spline of this size and degree has.
+//
+// Public because a caller building a spline by hand, or reading one
+// out of a file that stores only the controls, needs the same vector
+// this package would have built.
+//
+// ```novo
+// use std.list
+// use curvespline
+//
+// fn main() [io]
+//     println("${list.len(curvespline.clamped_knots(4, 3))}")   // 8
+// ```
+pub fn clamped_knots(control_count: Int, degree: Int) -> [Float] []
+    todo("curves-nv.curvespline.clamped_knots")
+
+// The spline with one control point moved.
+//
+// THE OPERATION A B-SPLINE EXISTS FOR: moving one control changes the
+// curve only over the `degree + 1` segments that control affects, and
+// nowhere else.  A caller dragging a handle redraws those segments and
+// leaves the rest alone, and `affected_segments` says which.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Err(e) => println(e.message())
+//         Ok(b)  =>
+//             match curvespline.move_control(b, 1, curvepoint.pt(1.0, 2.0))
+//                 Ok(m)  => println("${curvespline.eval(m, 0.5).y > 0.0}")
+//                 Err(e) => println(e.message())
+// ```
+pub fn move_control(b: CurveBspline, index: Int,
+                    to: CurvePoint) -> Result<CurveBspline, CurveFault> []
+    todo("curves-nv.curvespline.move_control")
+
+// Which segment indices a control point affects.
+//
+// ```novo
+// use std.list
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.clamped_bspline(pts, 3)
+//         Err(e) => println(e.message())
+//         Ok(b)  => println("${list.len(curvespline.affected_segments(b, 1))}")
+// ```
+pub fn affected_segments(b: CurveBspline, index: Int) -> [Int] []
+    todo("curves-nv.curvespline.affected_segments")
+
+// A Catmull-Rom spline through these points, centripetal.
+//
+// CENTRIPETAL IS THE DEFAULT ON PURPOSE.  It is the only one of the
+// three proved never to cusp or self-intersect, whatever the points
+// are, and the uniform formulation — which is what "Catmull-Rom" means
+// in most libraries — does both on points that are close together and
+// then far apart.  A caller that wants a different spacing asks for it
+// by name.
+//
+// At least four points: the basis needs one on each side of every
+// segment.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     match curvespline.catmull_rom([curvepoint.pt(0.0, 0.0)])
+//         Ok(_)  => println("this cannot happen — one point is not a spline")
+//         Err(e) => println(e.message())
+// ```
+pub fn catmull_rom(points: [CurvePoint]) -> Result<CurveCatmull, CurveFault> []
+    todo("curves-nv.curvespline.catmull_rom")
+
+// A Catmull-Rom spline with a spacing rule of the caller's choosing.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.catmull_rom_with(pts, CurveAlphaChordal)
+//         Ok(s)  => println(curvespline.alpha_name(s.alpha))   // chordal
+//         Err(e) => println(e.message())
+// ```
+pub fn catmull_rom_with(points: [CurvePoint],
+                        alpha: CurveAlpha) -> Result<CurveCatmull, CurveFault> []
+    todo("curves-nv.curvespline.catmull_rom_with")
+
+// The point at a parameter of a Catmull-Rom spline.
+//
+// The curve passes through every knot point, so `eval` at the
+// parameter of a knot is that knot exactly.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.catmull_rom(pts)
+//         Ok(s)  => println("${curvespline.catmull_eval(s, 0.0).x}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn catmull_eval(s: CurveCatmull, t: Float) -> CurvePoint []
+    todo("curves-nv.curvespline.catmull_eval")
+
+// The Catmull-Rom spline as cubic Béziers.  EXACT.
+//
+// Each segment is a cubic whose control points are computed from four
+// consecutive knots and the spacing rule.  One cubic for each pair of
+// interior points, so `n` points give `n - 3` cubics.
+//
+// ```novo
+// use std.list
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0),
+//                curvepoint.pt(4.0, 0.0)]
+//     match curvespline.catmull_rom(pts)
+//         Err(e) => println(e.message())
+//         Ok(s)  => println("${list.len(curvespline.catmull_to_cubics(s))}")   // 2
+// ```
+pub fn catmull_to_cubics(s: CurveCatmull) -> [CurveCubic] []
+    todo("curves-nv.curvespline.catmull_to_cubics")
+
+// Whether this spline can cusp or self-intersect.
+//
+// False for a centripetal spline, whatever the points — that is the
+// theorem.  True for the other two, which is a fact a caller choosing a
+// spacing rule for data it has not seen needs to know.
+//
+// ```novo
+// use curvespline
+// use curvepoint
+//
+// fn main() [io]
+//     let pts = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+//                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+//     match curvespline.catmull_rom(pts)
+//         Ok(s)  => println("${curvespline.may_self_intersect(s)}")   // false
+//         Err(e) => println(e.message())
+// ```
+pub fn may_self_intersect(s: CurveCatmull) -> Bool []
+    todo("curves-nv.curvespline.may_self_intersect")

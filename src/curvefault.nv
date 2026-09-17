@@ -1,0 +1,108 @@
+// curvefault.nv — the few ways a curve operation refuses, and why
+// there are so few.
+//
+// MOST OF THIS PACKAGE CANNOT FAIL
+//
+// Evaluating a cubic at a parameter is three linear interpolations.
+// Subdividing it is six.  Neither has a failure mode, and neither
+// should pretend to have one: a `Result` on `eval` would make every
+// caller write a `match` around arithmetic that cannot go wrong, and
+// the habit of writing that `match` without reading it is how real
+// errors get swallowed.
+//
+// So the refusals here are about DEGENERATE INPUT and about the two
+// searches that can be asked for something impossible: a tolerance
+// that is zero or negative, a B-spline whose knot vector does not
+// match its control points, an arc whose radii are zero, an arc-length
+// parameter past the end of the curve.
+//
+// A TOLERANCE OF ZERO IS THE ONE WORTH NAMING
+//
+// Flattening a curve to a tolerance of zero does not terminate: the
+// error bound never falls below zero and the subdivision never stops.
+// A library that clamped it to some small positive number would be
+// choosing the caller's precision silently.  `CurveToleranceNotPositive`
+// says what was asked for.
+
+// Why a curve operation refused.
+//
+// ```novo
+// use curvefault
+//
+// fn main() [io]
+//     println(CurveToleranceNotPositive(0.0).message())
+// ```
+pub enum CurveFault
+    // A tolerance of zero or less.  Flattening to zero does not
+    // terminate, and clamping it would be choosing the caller's
+    // precision for it.
+    CurveToleranceNotPositive(given: Float)
+    // An arc-length parameter outside `0 ..= arc_length`.
+    CurveArcLengthOutOfRange(given: Float, total: Float)
+    // A parameter outside `0.0 ..= 1.0` handed to a function that
+    // refuses one, rather than to `eval`, which clamps.
+    CurveParameterOutOfRange(given: Float)
+    // A subdivision range whose start is not before its end.
+    CurveRangeInverted(t0: Float, t1: Float)
+    // A B-spline whose knot vector is not `control_points + degree +
+    // 1` long.
+    CurveKnotCountWrong(knots: Int, expected: Int)
+    // A B-spline knot vector that is not non-decreasing, naming the
+    // first index where it falls.
+    CurveKnotsNotAscending(index: Int)
+    // A B-spline with fewer control points than its degree needs.
+    CurveTooFewControlPoints(given: Int, needed: Int)
+    // A degree outside 1 to 7.  Nothing in two-dimensional drawing
+    // uses more, and the basis evaluation's cost is cubic in it.
+    CurveDegreeOutOfRange(given: Int)
+    // An elliptical arc with a zero radius.  SVG's own rule is to
+    // treat it as a straight line, which is right for a renderer and
+    // wrong for a library that was asked for an arc.
+    CurveRadiusNotPositive(rx: Float, ry: Float)
+    // A Catmull-Rom spline with fewer than four control points, which
+    // is the smallest number the basis needs.
+    CurveTooFewKnotPoints(given: Int)
+    // A subdivision or flattening that hit its recursion ceiling
+    // before reaching the tolerance.  Reported rather than silently
+    // truncated: a caller that asked for a tolerance of 1e-12 on a
+    // curve the size of a continent needs to be told it did not get
+    // one.
+    CurveFlattenLimitReached(segments: Int, limit: Int)
+
+// `CurveFault` is an `Error`, which is what lets `Result<T,
+// CurveFault>` exist at all.
+impl Error for CurveFault
+    // The one-line message, naming the number that was wrong.
+    //
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("curves-nv.CurveFault.message")
+
+// A short stable code for logs: `"tolerance_not_positive"`,
+// `"knot_count_wrong"`, and so on.
+//
+// ```novo
+// use curvefault
+//
+// fn main() [io]
+//     println(curvefault.code(CurveToleranceNotPositive(0.0)))
+// ```
+pub fn code(f: CurveFault) -> Str []
+    todo("curves-nv.curvefault.code")
+
+// Whether the refusal is about the caller's arguments rather than
+// about the curve.
+//
+// True for a bad tolerance, a bad parameter and an inverted range —
+// the three a caller fixes by passing something else.  False for a
+// malformed spline, which is a value that should not have been built.
+//
+// ```novo
+// use curvefault
+//
+// fn main() [io]
+//     println("${curvefault.is_argument_fault(CurveToleranceNotPositive(0.0))}")   // true
+//     println("${curvefault.is_argument_fault(CurveKnotCountWrong(3, 7))}")        // false
+// ```
+pub fn is_argument_fault(f: CurveFault) -> Bool []
+    todo("curves-nv.curvefault.is_argument_fault")
