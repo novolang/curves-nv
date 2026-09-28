@@ -1,6 +1,6 @@
 [package]
 name        = "curves-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Planar curves as values: quadratic and cubic Béziers, elliptical arcs, B-splines and Catmull-Rom splines, with evaluation, derivatives, curvature, arc length and its inverse, subdivision, flattening to a named tolerance, nearest point, exact and hull bounds, and intersection with a line.  Every tolerance is an argument.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -53,4 +53,4 @@ novo        = ">= 0.9.0"
 #
 # `core` with no dependencies of its own, so the layer rule holds and
 # the closure grows by one.
-geometry-nv = "^0.0.1"
+geometry-nv = "^0.1.0"
