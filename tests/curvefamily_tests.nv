@@ -1,8 +1,5 @@
 // curvefamily_tests.nv — the quadratic, the arc and the two splines:
 // what each one has that a cubic does not.
-//
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: curves-nv.<module>.<fn>`.
 
 use std.test
 use std.list

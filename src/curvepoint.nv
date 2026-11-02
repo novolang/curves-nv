@@ -114,7 +114,7 @@ pub struct CurveRect
 //     println("${curvepoint.pt(1.0, 2.0).y}")   // 2
 // ```
 pub fn pt(x: Float, y: Float) -> CurvePoint []
-    todo("curves-nv.curvepoint.pt")
+    CurvePoint { x: x, y: y }
 
 // A vector from two numbers.
 //
@@ -125,7 +125,7 @@ pub fn pt(x: Float, y: Float) -> CurvePoint []
 //     println("${curvepoint.vec(1.0, 2.0).dy}")   // 2
 // ```
 pub fn vec(dx: Float, dy: Float) -> CurveVec []
-    todo("curves-nv.curvepoint.vec")
+    CurveVec { dx: dx, dy: dy }
 
 // A rectangle from a corner and a size.
 //
@@ -136,7 +136,7 @@ pub fn vec(dx: Float, dy: Float) -> CurveVec []
 //     println("${curvepoint.rect(1.0, 1.0, 2.0, 3.0).width}")   // 2
 // ```
 pub fn rect(x: Float, y: Float, width: Float, height: Float) -> CurveRect []
-    todo("curves-nv.curvepoint.rect")
+    CurveRect { x: x, y: y, width: width, height: height }
 
 // The point offset by a vector.
 //
@@ -147,7 +147,7 @@ pub fn rect(x: Float, y: Float, width: Float, height: Float) -> CurveRect []
 //     println("${curvepoint.offset(curvepoint.pt(1.0, 1.0), curvepoint.vec(2.0, 0.0)).x}")
 // ```
 pub fn offset(p: CurvePoint, v: CurveVec) -> CurvePoint []
-    todo("curves-nv.curvepoint.offset")
+    pt(p.x + v.dx, p.y + v.dy)
 
 // The vector from one point to another.
 //
@@ -158,7 +158,7 @@ pub fn offset(p: CurvePoint, v: CurveVec) -> CurvePoint []
 //     println("${curvepoint.between(curvepoint.pt(1.0, 0.0), curvepoint.pt(4.0, 0.0)).dx}")
 // ```
 pub fn between(from: CurvePoint, to: CurvePoint) -> CurveVec []
-    todo("curves-nv.curvepoint.between")
+    vec(to.x - from.x, to.y - from.y)
 
 // The point a fraction of the way from one to another.
 //
@@ -173,7 +173,13 @@ pub fn between(from: CurvePoint, to: CurvePoint) -> CurveVec []
 //     println("${curvepoint.lerp(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0), 0.25).x}")
 // ```
 pub fn lerp(a: CurvePoint, b: CurvePoint, t: Float) -> CurvePoint []
-    todo("curves-nv.curvepoint.lerp")
+    // Exact at both ends, so that a de Casteljau subdivision built out of
+    // it lands on its own endpoints rather than a rounding away from them.
+    if t == 0.0
+        return a
+    if t == 1.0
+        return b
+    pt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 
 // How far apart two points are.
 //
@@ -184,7 +190,7 @@ pub fn lerp(a: CurvePoint, b: CurvePoint, t: Float) -> CurvePoint []
 //     println("${curvepoint.distance(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))}")
 // ```
 pub fn distance(a: CurvePoint, b: CurvePoint) -> Float []
-    todo("curves-nv.curvepoint.distance")
+    length(between(a, b))
 
 // A vector's length.
 //
@@ -195,7 +201,7 @@ pub fn distance(a: CurvePoint, b: CurvePoint) -> Float []
 //     println("${curvepoint.length(curvepoint.vec(3.0, 4.0))}")   // 5
 // ```
 pub fn length(v: CurveVec) -> Float []
-    todo("curves-nv.curvepoint.length")
+    math.sqrt(v.dx * v.dx + v.dy * v.dy)
 
 // A vector scaled to length one, or `None` when it has no length.
 //
@@ -212,7 +218,10 @@ pub fn length(v: CurveVec) -> Float []
 //         None    => println("no direction")
 // ```
 pub fn normalize(v: CurveVec) -> ?CurveVec []
-    todo("curves-nv.curvepoint.normalize")
+    let n = length(v)
+    if n == 0.0
+        return None
+    Some(vec(v.dx / n, v.dy / n))
 
 // The vector turned a quarter turn anticlockwise.
 //
@@ -223,7 +232,7 @@ pub fn normalize(v: CurveVec) -> ?CurveVec []
 //     println("${curvepoint.perpendicular(curvepoint.vec(1.0, 0.0)).dy}")   // 1
 // ```
 pub fn perpendicular(v: CurveVec) -> CurveVec []
-    todo("curves-nv.curvepoint.perpendicular")
+    vec(0.0 - v.dy, v.dx)
 
 // The smallest rectangle containing every point of a list.
 //
@@ -239,7 +248,23 @@ pub fn perpendicular(v: CurveVec) -> CurveVec []
 //     println("${r.width}")                     // 2
 // ```
 pub fn bounds_of(points: [CurvePoint]) -> CurveRect []
-    todo("curves-nv.curvepoint.bounds_of")
+    if list.len(points) == 0
+        return rect(0.0, 0.0, 0.0, 0.0)
+    var minx = points[0].x
+    var maxx = points[0].x
+    var miny = points[0].y
+    var maxy = points[0].y
+    for i in 1..list.len(points)
+        let p = points[i]
+        if p.x < minx
+            minx = p.x
+        if p.x > maxx
+            maxx = p.x
+        if p.y < miny
+            miny = p.y
+        if p.y > maxy
+            maxy = p.y
+    rect(minx, miny, maxx - minx, maxy - miny)
 
 // The rectangle containing both of two rectangles.
 //
@@ -254,7 +279,11 @@ pub fn bounds_of(points: [CurvePoint]) -> CurveRect []
 //     println("${curvepoint.union(a, b).width}")   // 3
 // ```
 pub fn union(a: CurveRect, b: CurveRect) -> CurveRect []
-    todo("curves-nv.curvepoint.union")
+    let minx = math.min(a.x, b.x)
+    let miny = math.min(a.y, b.y)
+    let maxx = math.max(a.x + a.width, b.x + b.width)
+    let maxy = math.max(a.y + a.height, b.y + b.height)
+    rect(minx, miny, maxx - minx, maxy - miny)
 
 // This package's point as geometry-nv's.
 //
@@ -272,7 +301,7 @@ pub fn union(a: CurveRect, b: CurveRect) -> CurveRect []
 //     println("${curvepoint.to_geom(curvepoint.pt(1.0, 2.0)).y}")   // 2
 // ```
 pub fn to_geom(p: CurvePoint) -> GeomPointF []
-    todo("curves-nv.curvepoint.to_geom")
+    geompoint.ptf(p.x, p.y)
 
 // geometry-nv's point as this package's.
 //
@@ -284,7 +313,7 @@ pub fn to_geom(p: CurvePoint) -> GeomPointF []
 //     println("${curvepoint.of_geom(geompoint.ptf(1.0, 2.0)).x}")   // 1
 // ```
 pub fn of_geom(p: GeomPointF) -> CurvePoint []
-    todo("curves-nv.curvepoint.of_geom")
+    pt(p.x, p.y)
 
 // This package's vector as geometry-nv's.
 //
@@ -295,7 +324,7 @@ pub fn of_geom(p: GeomPointF) -> CurvePoint []
 //     println("${curvepoint.vec_to_geom(curvepoint.vec(1.0, 0.0)).dx}")   // 1
 // ```
 pub fn vec_to_geom(v: CurveVec) -> GeomVecF []
-    todo("curves-nv.curvepoint.vec_to_geom")
+    geompoint.vecf(v.dx, v.dy)
 
 // geometry-nv's vector as this package's.
 //
@@ -307,7 +336,7 @@ pub fn vec_to_geom(v: CurveVec) -> GeomVecF []
 //     println("${curvepoint.vec_of_geom(geompoint.vecf(1.0, 0.0)).dx}")   // 1
 // ```
 pub fn vec_of_geom(v: GeomVecF) -> CurveVec []
-    todo("curves-nv.curvepoint.vec_of_geom")
+    vec(v.dx, v.dy)
 
 // This package's rectangle as geometry-nv's.
 //
@@ -318,7 +347,8 @@ pub fn vec_of_geom(v: GeomVecF) -> CurveVec []
 //     println("${curvepoint.rect_to_geom(curvepoint.rect(0.0, 0.0, 2.0, 1.0)).max.x}")
 // ```
 pub fn rect_to_geom(r: CurveRect) -> GeomRectF []
-    todo("curves-nv.curvepoint.rect_to_geom")
+    geomrect.of_corners(geompoint.ptf(r.x, r.y),
+                        geompoint.ptf(r.x + r.width, r.y + r.height))
 
 // geometry-nv's rectangle as this package's.
 //
@@ -330,7 +360,7 @@ pub fn rect_to_geom(r: CurveRect) -> GeomRectF []
 //     println("${curvepoint.rect_of_geom(geomrect.of_xywh(0.0, 0.0, 2.0, 1.0)).width}")
 // ```
 pub fn rect_of_geom(r: GeomRectF) -> CurveRect []
-    todo("curves-nv.curvepoint.rect_of_geom")
+    rect(r.min.x, r.min.y, geomrect.width(r), geomrect.height(r))
 
 // A whole list of this package's points as geometry-nv's.
 //
@@ -346,4 +376,7 @@ pub fn rect_of_geom(r: GeomRectF) -> CurveRect []
 //     println("${list.len(curvepoint.to_geom_list([curvepoint.pt(0.0, 0.0)]))}")   // 1
 // ```
 pub fn to_geom_list(points: [CurvePoint]) -> [GeomPointF] []
-    todo("curves-nv.curvepoint.to_geom_list")
+    var out: [GeomPointF] = []
+    for p in points
+        list.push(out, geompoint.ptf(p.x, p.y))
+    out

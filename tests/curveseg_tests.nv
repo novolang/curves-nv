@@ -1,8 +1,5 @@
 // curveseg_tests.nv — the union over the four families, and the path
 // operations written once over it.
-//
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: curves-nv.curveseg.<fn>`.
 
 use std.test
 use std.list

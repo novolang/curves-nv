@@ -1,0 +1,1572 @@
+// curves_nv_edge_tests.nv — the cases the four interface suites leave
+// open: degenerate control points, the endpoints, subdivision against
+// evaluation, and what the two approximations promise.
+//
+// FOUR THINGS A CURVE LIBRARY IS JUDGED ON, and none of them is a
+// happy path:
+//
+//   1. evaluation at the endpoints is EXACT, and a point on a curve is
+//      inside the hull of its controls — that is what makes a
+//      flattened curve meet the ends of its neighbours;
+//   2. splitting a curve agrees with evaluating it, so a renderer that
+//      subdivides and one that samples draw the same picture;
+//   3. a degenerate control polygon is a VALID curve and the empty one
+//      is refused;
+//   4. an arc length and a curvature are approximations, so each one's
+//      number is checked against a case with a closed-form answer.
+
+use std.test
+use std.list
+use std.math
+use std.str
+use curvefault
+use curvepoint
+use curvecubic
+use curvequad
+use curvearc
+use curvespline
+use curveseg
+use geomxform
+
+// The cubic with a cusp at `t = 0.5`: `p2 + p3 == p0 + p1` is the
+// condition that makes its derivative vanish there, and the cusp it
+// makes is the point (0.5, 1).
+fn cusp_cubic() -> CurveCubic
+    curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                     curvepoint.pt(0.0, 2.0), curvepoint.pt(1.0, 0.0 - 1.0))
+
+// A cubic that comes back to where it started, so its chord is
+// degenerate and flattening it meets a zero-length chord.
+fn closed_cubic() -> CurveCubic
+    curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 2.0),
+                     curvepoint.pt(0.0 - 2.0, 2.0), curvepoint.pt(0.0, 0.0))
+
+// A quadratic that goes out along the x axis and comes back along the
+// same line: its speed is not constant and its derivative vanishes at
+// the turn.
+fn fold_quad() -> CurveQuad
+    curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+                   curvepoint.pt(0.0, 0.0))
+
+// The ordinary hump, whose apex is 0.5 high where the control point is
+// 1 high.
+fn hump_quad() -> CurveQuad
+    curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                   curvepoint.pt(2.0, 0.0))
+
+fn bump_points() -> [CurvePoint]
+    [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0), curvepoint.pt(2.0, 0.0),
+     curvepoint.pt(3.0, 1.0), curvepoint.pt(4.0, 0.0)]
+
+fn quarter() -> CurveArcCenter
+    curvearc.circular(curvepoint.pt(0.0, 0.0), 2.0, 0.0, math.pi() / 2.0)
+
+@test
+fn test_evaluation_is_exact_at_the_endpoints_and_clamped_outside() [io]
+    // A flattening that lands beside `p0` instead of on it leaves a
+    // hairline gap wherever two curves of one path meet.
+    let c = cusp_cubic()
+    test.case("a cubic at 0 and at 1 is its outer control points, bit for bit")
+    test.assert(curvecubic.eval(c, 0.0).x == c.p0.x)
+    test.assert(curvecubic.eval(c, 0.0).y == c.p0.y)
+    test.assert(curvecubic.eval(c, 1.0).x == c.p3.x)
+    test.assert(curvecubic.eval(c, 1.0).y == c.p3.y)
+
+    test.case("a parameter outside the unit interval is clamped, not extrapolated")
+    test.assert(curvecubic.eval(c, 0.0 - 4.0).x == c.p0.x)
+    test.assert(curvecubic.eval(c, 9.0).y == c.p3.y)
+
+    test.case("and the same holds for the quadratic")
+    let q = hump_quad()
+    test.assert(curvequad.eval(q, 0.0).x == 0.0)
+    test.assert(curvequad.eval(q, 0.0).y == 0.0)
+    test.assert(curvequad.eval(q, 1.0).x == 2.0)
+    test.assert(curvequad.eval(q, 1.0).y == 0.0)
+    test.assert(curvequad.derivative(q, 0.0).dx == 2.0)
+    test.assert(curvequad.derivative(q, 1.0).dx == 2.0)
+
+    test.case("a clamped spline starts and ends on its outer controls")
+    match curvespline.clamped_bspline(bump_points(), 3)
+        Ok(b)  =>
+            test.assert(curvespline.eval(b, 0.0).x == 0.0)
+            test.assert(curvespline.eval(b, 0.0).y == 0.0)
+            test.assert(curvespline.eval(b, 1.0).x == 4.0)
+            test.assert(curvespline.eval(b, 1.0).y == 0.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("a centripetal Catmull-Rom starts and ends on its interior knots")
+    match curvespline.catmull_rom(bump_points())
+        Ok(s)  =>
+            let first = curvespline.catmull_eval(s, 0.0)
+            let last = curvespline.catmull_eval(s, 1.0)
+            test.assert(first.x == 1.0)
+            test.assert(first.y == 1.0)
+            test.assert(last.x == 3.0)
+            test.assert(last.y == 1.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("an arc's ends are its own closed form")
+    let a = quarter()
+    test.assert(curvearc.eval(a, 0.0).x == 2.0)
+    test.assert(curvearc.eval(a, 0.0).y == 0.0)
+    test.assert_approx(curvearc.eval(a, 1.0).x, 0.0, 1e-15)
+    test.assert_approx(curvearc.eval(a, 1.0).y, 2.0, 1e-15)
+
+@test
+fn test_every_point_of_a_curve_is_inside_the_hull_of_its_controls() [io]
+    // De Casteljau is convex combinations all the way down, so this
+    // holds at every parameter.  It is what lets a spatial index skip
+    // a curve whose hull misses a box without evaluating it.
+    test.case("the cubic, against its hull and against its exact bounds")
+    let c = cusp_cubic()
+    let hull = curvecubic.hull_bounds(c)
+    let exact = curvecubic.bounds(c)
+    var i = 0
+    while i <= 24
+        let p = curvecubic.eval(c, i as Float / 24.0)
+        test.assert(p.x >= hull.x and p.x <= hull.x + hull.width)
+        test.assert(p.y >= hull.y and p.y <= hull.y + hull.height)
+        test.assert(p.x >= exact.x and p.x <= exact.x + exact.width)
+        test.assert(p.y >= exact.y and p.y <= exact.y + exact.height)
+        i = i + 1
+    test.assert(hull.height >= exact.height)
+
+    test.case("the quadratic, whose exact apex is half its control point")
+    let q = hump_quad()
+    let qh = curvequad.hull_bounds(q)
+    let qe = curvequad.bounds(q)
+    test.assert_approx(qe.height, 0.5, 1e-12)
+    test.assert(qh.height > qe.height)
+    var j = 0
+    while j <= 16
+        let p = curvequad.eval(q, j as Float / 16.0)
+        test.assert(p.y >= qe.y and p.y <= qe.y + qe.height)
+        test.assert(p.x >= qh.x and p.x <= qh.x + qh.width)
+        j = j + 1
+
+    test.case("a spline's controls bound it too")
+    match curvespline.clamped_bspline(bump_points(), 3)
+        Ok(b)  =>
+            let box = curvepoint.bounds_of(b.controls)
+            var k = 0
+            while k <= 16
+                let p = curvespline.eval(b, k as Float / 16.0)
+                test.assert(p.x >= box.x and p.x <= box.x + box.width)
+                test.assert(p.y >= box.y and p.y <= box.y + box.height)
+                k = k + 1
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_subdivision_agrees_with_evaluation() [io]
+    // The same curve, split and not split, has to answer the same
+    // points — otherwise a renderer that subdivides to the flatness
+    // bound and one that samples draw two different curves.
+    test.case("the cubic, cut at 0.3")
+    let c = cusp_cubic()
+    let cut = curvecubic.subdivide(c, 0.3)
+    let head = cut.0
+    let tail = cut.1
+    test.assert(head.p0.x == c.p0.x)
+    test.assert(head.p0.y == c.p0.y)
+    test.assert(tail.p3.x == c.p3.x)
+    test.assert(tail.p3.y == c.p3.y)
+    test.assert_approx(head.p3.x, curvecubic.eval(c, 0.3).x, 1e-14)
+    test.assert_approx(head.p3.y, curvecubic.eval(c, 0.3).y, 1e-14)
+    test.assert(head.p3.x == tail.p0.x)
+    test.assert(head.p3.y == tail.p0.y)
+    var i = 0
+    while i <= 8
+        let u = i as Float / 8.0
+        let h = curvecubic.eval(head, u)
+        let whole_head = curvecubic.eval(c, 0.3 * u)
+        test.assert_approx(h.x, whole_head.x, 1e-12)
+        test.assert_approx(h.y, whole_head.y, 1e-12)
+        let t = curvecubic.eval(tail, u)
+        let whole_tail = curvecubic.eval(c, 0.3 + 0.7 * u)
+        test.assert_approx(t.x, whole_tail.x, 1e-12)
+        test.assert_approx(t.y, whole_tail.y, 1e-12)
+        i = i + 1
+
+    test.case("`segment` is the same curve with its parameter rescaled")
+    match curvecubic.segment(c, 0.25, 0.75)
+        Ok(part) =>
+            test.assert_approx(curvecubic.eval(part, 0.0).x,
+                               curvecubic.eval(c, 0.25).x, 1e-14)
+            test.assert_approx(curvecubic.eval(part, 1.0).y,
+                               curvecubic.eval(c, 0.75).y, 1e-14)
+            var k = 0
+            while k <= 8
+                let u = k as Float / 8.0
+                let a = curvecubic.eval(part, u)
+                let b = curvecubic.eval(c, 0.25 + 0.5 * u)
+                test.assert_approx(a.x, b.x, 1e-12)
+                test.assert_approx(a.y, b.y, 1e-12)
+                k = k + 1
+        Err(e)   => test.fail(e.message())
+
+    test.case("and the quadratic's")
+    match curvequad.segment(hump_quad(), 0.2, 0.7)
+        Ok(part) =>
+            var k = 0
+            while k <= 8
+                let u = k as Float / 8.0
+                let a = curvequad.eval(part, u)
+                let b = curvequad.eval(hump_quad(), 0.2 + 0.5 * u)
+                test.assert_approx(a.x, b.x, 1e-12)
+                test.assert_approx(a.y, b.y, 1e-12)
+                k = k + 1
+        Err(e)   => test.fail(e.message())
+
+    test.case("the arc, cut at 0.4 — its halves share the centre")
+    let arc = quarter()
+    let ah = curvearc.subdivide(arc, 0.4)
+    let first = ah.0
+    let second = ah.1
+    test.assert(first.center.x == arc.center.x)
+    test.assert(first.rx == arc.rx)
+    test.assert(second.ry == arc.ry)
+    var m = 0
+    while m <= 8
+        let u = m as Float / 8.0
+        let l = curvearc.eval(first, u)
+        let wl = curvearc.eval(arc, 0.4 * u)
+        test.assert_approx(l.x, wl.x, 1e-12)
+        test.assert_approx(l.y, wl.y, 1e-12)
+        let r = curvearc.eval(second, u)
+        let wr = curvearc.eval(arc, 0.4 + 0.6 * u)
+        test.assert_approx(r.x, wr.x, 1e-12)
+        test.assert_approx(r.y, wr.y, 1e-12)
+        m = m + 1
+
+    test.case("a spline's cubics ARE the spline, for the degrees they are exact at")
+    match curvespline.clamped_bspline(bump_points(), 3)
+        Ok(b)  =>
+            let cubics = curvespline.to_cubics(b)
+            let spans = curvespline.segment_count(b)
+            test.assert(list.len(cubics) == spans)
+            for s in 0..spans
+                let piece = list.get(cubics, s)
+                let lo = s as Float / spans as Float
+                let hi = (s + 1) as Float / spans as Float
+                var k = 0
+                while k <= 4
+                    let u = k as Float / 4.0
+                    let a = curvecubic.eval(piece, u)
+                    let whole = curvespline.eval(b, lo + (hi - lo) * u)
+                    test.assert_approx(a.x, whole.x, 1e-9)
+                    test.assert_approx(a.y, whole.y, 1e-9)
+                    k = k + 1
+        Err(e) => test.fail(e.message())
+
+    test.case("and a Catmull-Rom's cubics are its own segments")
+    match curvespline.catmull_rom(bump_points())
+        Ok(s)  =>
+            let cubics = curvespline.catmull_to_cubics(s)
+            let segments = list.len(cubics)
+            test.assert(segments == 2)
+            for k in 0..segments
+                let piece = list.get(cubics, k)
+                let lo = k as Float / segments as Float
+                var u = 0.0
+                while u <= 1.0
+                    let a = curvecubic.eval(piece, u)
+                    let whole = curvespline.catmull_eval(s, lo + u / segments as Float)
+                    test.assert_approx(a.x, whole.x, 1e-12)
+                    test.assert_approx(a.y, whole.y, 1e-12)
+                    u = u + 0.25
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_union_dispatches_every_operation_to_every_family() [io]
+    // The generic layer is where a path is written, so every arm of it
+    // is taken here at least once: an arm that was never run is an arm
+    // nobody has read.
+    var segs: [CurveSegment] = [CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0)),
+         CurveSegQuad(hump_quad()),
+         CurveSegCubic(closed_cubic()),
+         CurveSegArc(quarter())]
+    for i in 0..list.len(segs)
+        let s = list.get(segs, i)
+        test.case("segment ${i}: ends, eval and derivative")
+        test.assert_approx(curveseg.eval(s, 0.0).x, curveseg.start(s).x, 1e-14)
+        test.assert_approx(curveseg.eval(s, 1.0).y, curveseg.end(s).y, 1e-14)
+        test.assert(curvepoint.length(curveseg.derivative(s, 0.25)) > 0.0)
+
+        test.case("segment ${i}: bounds contain the curve")
+        let box = curveseg.bounds(s)
+        var k = 0
+        while k <= 8
+            let p = curveseg.eval(s, k as Float / 8.0)
+            test.assert(p.x >= box.x - 1e-12 and p.x <= box.x + box.width + 1e-12)
+            test.assert(p.y >= box.y - 1e-12 and p.y <= box.y + box.height + 1e-12)
+            k = k + 1
+
+        test.case("segment ${i}: flattening starts and ends on the curve")
+        match curveseg.flatten(s, 0.01)
+            Ok(pts) =>
+                let first = list.get(pts, 0)
+                let last = list.get(pts, list.len(pts) - 1)
+                test.assert_approx(first.x, curveseg.start(s).x, 1e-12)
+                test.assert_approx(last.x, curveseg.end(s).x, 1e-12)
+            Err(e)  => test.fail(e.message())
+
+        test.case("segment ${i}: length, cut, reverse, transform, cubics")
+        match curveseg.arc_length(s, 1e-9)
+            Ok(n)  => test.assert(n > 0.0)
+            Err(e) => test.fail(e.message())
+        let halves = curveseg.subdivide(s, 0.5)
+        test.assert_approx(curveseg.end(halves.0).x, curveseg.eval(s, 0.5).x, 1e-12)
+        test.assert_approx(curveseg.start(halves.1).y, curveseg.eval(s, 0.5).y, 1e-12)
+        test.assert_approx(curveseg.start(curveseg.reverse(s)).x,
+                           curveseg.end(s).x, 1e-12)
+        let moved = curveseg.transform(s, geomxform.translation(1.0, 0.0))
+        test.assert_approx(curveseg.start(moved).x, curveseg.start(s).x + 1.0, 1e-12)
+        test.assert(list.len(curveseg.to_cubics(s)) >= 1)
+
+        test.case("segment ${i}: the nearest point beats every sample")
+        let probe = curvepoint.pt(0.5, 0.5)
+        match curveseg.nearest_point(s, probe, 1e-9)
+            Ok(hit) =>
+                test.assert_approx(hit.point.x, curveseg.eval(s, hit.t).x, 1e-12)
+                var j = 0
+                while j <= 32
+                    let d = curvepoint.distance(curveseg.eval(s, j as Float / 32.0),
+                                                probe)
+                    test.assert(hit.distance <= d + 1e-6)
+                    j = j + 1
+            Err(e)  => test.fail(e.message())
+
+        test.case("segment ${i}: every crossing is a point on the line")
+        let hits = curveseg.intersect_line(s, curvepoint.pt(0.0 - 10.0, 0.5),
+                                           curvepoint.pt(10.0, 0.5))
+        for h in 0..list.len(hits)
+            let hit = list.get(hits, h)
+            test.assert(hit.t >= 0.0 and hit.t <= 1.0)
+            test.assert_approx(hit.point.y, 0.5, 1e-6)
+
+@test
+fn test_degenerate_control_points_are_curves_and_the_empty_one_is_refused() [io]
+    // A curve that stands still is what an animator's collapsed handle
+    // produces, and refusing it would make every caller special-case a
+    // value the type system allows.  A curve with no control points is
+    // not a curve and has no point to evaluate to.
+    test.case("all four control points equal: a point, not an error")
+    let p = curvepoint.pt(3.0, 0.0 - 2.0)
+    let still = curvecubic.cubic(p, p, p, p)
+    test.assert(curvecubic.eval(still, 0.0).x == 3.0)
+    test.assert(curvecubic.eval(still, 0.5).y == 0.0 - 2.0)
+    test.assert(curvecubic.eval(still, 1.0).x == 3.0)
+    match curvecubic.arc_length(still, 1e-9)
+        Ok(n)  => test.assert(n == 0.0)
+        Err(e) => test.fail(e.message())
+    match curvecubic.t_for_length(still, 0.0, 1e-9)
+        Ok(t)  => test.assert(t == 0.0)
+        Err(e) => test.fail(e.message())
+    test.assert(curvecubic.bounds(still).width == 0.0)
+    test.assert(curvecubic.bounds(still).height == 0.0)
+    test.assert(curvecubic.curvature(still, 0.5) == 0.0)
+    test.assert_none(curvecubic.unit_tangent(still, 0.5))
+    test.assert_none(curvecubic.unit_normal(still, 0.5))
+    match curvecubic.flatten(still, 0.1)
+        Ok(pts) => test.assert(list.len(pts) == 2)
+        Err(e)  => test.fail(e.message())
+
+    test.case("two equal control points: a curve with a still end")
+    let doubled = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 0.0),
+                                   curvepoint.pt(4.0, 0.0), curvepoint.pt(4.0, 0.0))
+    test.assert(curvecubic.eval(doubled, 0.0).x == 0.0)
+    test.assert(curvecubic.eval(doubled, 1.0).x == 4.0)
+    match curvecubic.arc_length(doubled, 1e-9)
+        Ok(n)  => test.assert_approx(n, 4.0, 1e-12)
+        Err(e) => test.fail(e.message())
+
+    test.case("a zero-length line is a curve, and its nearest point is itself")
+    let dot = curvecubic.line(p, p)
+    match curvecubic.arc_length(dot, 1e-9)
+        Ok(n)  => test.assert(n == 0.0)
+        Err(e) => test.fail(e.message())
+    match curvecubic.nearest_point(dot, curvepoint.pt(3.0, 0.0 - 3.0), 1e-9)
+        Ok(hit) => test.assert(hit.distance == 1.0)
+        Err(e)  => test.fail(e.message())
+
+    test.case("a cusp is a real cubic and reports zero curvature, not a NaN")
+    let cusp = cusp_cubic()
+    let tip = curvecubic.eval(cusp, 0.5)
+    test.assert_approx(tip.x, 0.5, 1e-12)
+    test.assert_approx(tip.y, 1.0, 1e-12)
+    test.assert(curvecubic.curvature(cusp, 0.5) == 0.0)
+    test.assert_none(curvecubic.unit_tangent(cusp, 0.5))
+    test.assert_none(curvecubic.unit_normal(cusp, 0.5))
+    match curvecubic.flatten(cusp, 0.01)
+        Ok(pts) => test.assert(list.len(pts) > 2)
+        Err(e)  => test.fail(e.message())
+
+    test.case("and so is a quadratic that folds back on itself")
+    let fold = fold_quad()
+    test.assert(curvequad.curvature(fold, 0.5) == 0.0)
+    test.assert_none(curvequad.unit_tangent(fold, 0.5))
+    test.assert(curvequad.eval(fold, 0.5).x == 0.5)
+    test.assert(curvequad.eval(fold, 1.0).x == 0.0)
+
+    test.case("a closed cubic comes back to its start")
+    let ring = closed_cubic()
+    test.assert(curvecubic.eval(ring, 0.0).x == curvecubic.eval(ring, 1.0).x)
+    test.assert(curvecubic.eval(ring, 0.0).y == curvecubic.eval(ring, 1.0).y)
+    test.assert_approx(curvecubic.eval(ring, 0.5).y, 1.5, 1e-12)
+    test.assert_approx(curvecubic.bounds(ring).height, 1.5, 1e-12)
+    test.assert(not curvecubic.is_flat(ring, 0.1))
+    match curvecubic.flatten(ring, 0.01)
+        Ok(pts) => test.assert(list.len(pts) > 2)
+        Err(e)  => test.fail(e.message())
+
+    test.case("no control points at all is refused, by each family")
+    match curvespline.clamped_bspline([], 3)
+        Ok(_)  => test.fail("a spline with no control points is not a spline")
+        Err(e) => test.assert(curvefault.code(e) == "too_few_control_points")
+    match curvespline.bspline([], 3, [])
+        Ok(_)  => test.fail("that cannot be a spline")
+        Err(e) => test.assert(curvefault.code(e) == "too_few_control_points")
+    match curvespline.catmull_rom([])
+        Ok(_)  => test.fail("a spline through no points is not a spline")
+        Err(e) => test.assert(curvefault.code(e) == "too_few_knot_points")
+    match curveseg.path_flatten([], 0.1)
+        Ok(pts) => test.assert(list.len(pts) == 0)
+        Err(e)  => test.fail(e.message())
+    match curveseg.point_at_distance([], 1.0, 1e-9)
+        Ok(_)  => test.fail("there is nowhere on an empty path to be 1.0 along")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+    test.assert(curvepoint.bounds_of([]).width == 0.0)
+    test.assert(curvepoint.bounds_of([]).height == 0.0)
+
+@test
+fn test_a_length_is_checked_against_a_closed_form() [io]
+    // A length is an approximation and the tolerance is the claim, so
+    // every family is checked against a case whose answer is a formula.
+    test.case("a straight cubic's length is the distance between its ends")
+    let straight = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+    match curvecubic.arc_length(straight, 1e-9)
+        Ok(n)  => test.assert(n == 5.0)
+        Err(e) => test.fail(e.message())
+
+    test.case("a straight, uniformly spaced quadratic's is too")
+    // The control point at the midpoint makes the speed constant, which
+    // is the one case the closed form answers without a logarithm.
+    let flatq = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.5, 2.0),
+                               curvepoint.pt(3.0, 4.0))
+    test.assert(curvequad.arc_length(flatq) == 5.0)
+    match curvequad.t_for_length(flatq, 1.0, 1e-9)
+        Ok(t)  => test.assert(t == 0.2)
+        Err(e) => test.fail(e.message())
+
+    test.case("a parabola's length is sqrt(2) + asinh(1)")
+    // x = 2t, y = 2t(1 - t), whose speed integrates in closed form.
+    match curvequad.t_for_length(hump_quad(), 1.147793574696319, 1e-9)
+        Ok(t)  => test.assert_approx(t, 0.5, 1e-6)
+        Err(e) => test.fail(e.message())
+    test.assert_approx(curvequad.arc_length(hump_quad()), 2.295587149392638, 1e-12)
+
+    test.case("a curve that retraces itself has the length it travelled")
+    // Out along 0.5 and back: the length is the path, not the extent.
+    test.assert(curvequad.arc_length(fold_quad()) == 1.0)
+
+    test.case("a quadratic whose guess lands on its turning point still finds the length")
+    // x = 4t - 5t², y = 0: out to 0.8 at t = 0.4, where the speed is
+    // zero, and back to -1, so the total is 2.6.  A length of 1.04 makes
+    // the first guess 1.04 / 2.6 = 0.4, the turning point; the length is
+    // walked at x = 0.56 on the way back, t = (4 + sqrt(4.8)) / 10.
+    let turn = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(2.0, 0.0),
+                              curvepoint.pt(0.0 - 1.0, 0.0))
+    test.assert_approx(curvequad.arc_length(turn), 2.6, 1e-12)
+    match curvequad.t_for_length(turn, 1.04, 1e-12)
+        Ok(t)  => test.assert_approx(t, (4.0 + math.sqrt(4.8)) / 10.0, 1e-9)
+        Err(e) => test.fail(e.message())
+
+    test.case("a quarter circle of radius 2 is exactly pi*r/2, which is pi")
+    match curvearc.arc_length(quarter(), 1e-12)
+        Ok(n)  => test.assert(n == math.pi())
+        Err(e) => test.fail(e.message())
+    match curveseg.arc_length(CurveSegArc(quarter()), 1e-9)
+        Ok(n)  => test.assert(n == math.pi())
+        Err(e) => test.fail(e.message())
+    match curvearc.arc_length(quarter(), 0.0)
+        Ok(_)  => test.fail("a tolerance of zero does not terminate")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("a full ellipse is an elliptic integral, asserted to 1e-9")
+    // 4 a E(e^2) for a = 2, b = 1: 9.688448220547676, computed
+    // independently (Simpson on the arc length integral and Ramanujan's
+    // second approximation agree to twelve digits).  The claim under
+    // test is the tolerance asked for, and it is met with room.
+    match curvearc.arc_length(curvearc.ellipse(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0),
+                              1e-9)
+        Ok(n)  => test.assert_approx(n, 9.688448220547676, 1e-9)
+        Err(e) => test.fail(e.message())
+
+    test.case("a curved cubic's speed is a closed form and its length is exact")
+    // (0,0), (0,1), (1,1), (1,0): the derivative is (6t - 6t^2, 3 - 6t)
+    // and its length is exactly 3(2t^2 - 2t + 1) — the square of that
+    // is the square of the speed, term for term.  So the quadrature has
+    // a closed form to be checked against and not just itself: the
+    // length is exactly two, where the chord is one and the control
+    // polygon three.
+    let arch = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+                                curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+    var k = 0
+    while k <= 8
+        let u = k as Float / 8.0
+        let speed = curvepoint.length(curvecubic.derivative(arch, u))
+        test.assert_approx(speed, 3.0 * (2.0 * u * u - 2.0 * u + 1.0), 1e-12)
+        k = k + 1
+    match curvecubic.arc_length(arch, 1e-3)
+        Ok(coarse) =>
+            match curvecubic.arc_length(arch, 1e-12)
+                Ok(fine) =>
+                    test.assert_approx(coarse, 2.0, 1e-3)
+                    test.assert_approx(fine, 2.0, 1e-9)
+                Err(e)   => test.fail(e.message())
+        Err(e)     => test.fail(e.message())
+
+    test.case("a quarter circle's parameter at half its length is one half")
+    match curveseg.point_at_distance([CurveSegArc(quarter())], math.pi() / 2.0, 1e-9)
+        Ok(p)  =>
+            test.assert(p.0 == 0)
+            test.assert_approx(p.1.x, math.sqrt(2.0), 1e-6)
+            test.assert_approx(p.1.y, math.sqrt(2.0), 1e-6)
+        Err(e) => test.fail(e.message())
+
+    test.case("a straight cubic's t_for_length is a ratio and past the end is refused")
+    match curvecubic.t_for_length(straight, 2.5, 1e-9)
+        Ok(t)  => test.assert(t == 0.5)
+        Err(e) => test.fail(e.message())
+    match curvecubic.t_for_length(straight, 6.0, 1e-9)
+        Ok(_)  => test.fail("the curve is 5 long")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+    match curvecubic.t_for_length(straight, 1.0, 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+    match curvequad.t_for_length(hump_quad(), 0.0 - 1.0, 1e-9)
+        Ok(_)  => test.fail("a negative length is behind the start")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+
+@test
+fn test_curvature_is_checked_against_a_closed_form_too() [io]
+    // The other number that is a claim: on a straight curve it is zero,
+    // and at the apex of the hump it is one over the radius of the
+    // circle that kisses the curve there.
+    test.case("a straight curve has none")
+    let straight = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 0.0))
+    test.assert(curvecubic.curvature(straight, 0.25) == 0.0)
+    test.assert(curvequad.curvature(curvequad.quad(curvepoint.pt(0.0, 0.0),
+                                                   curvepoint.pt(1.0, 0.0),
+                                                   curvepoint.pt(2.0, 0.0)),
+                                                   0.5) == 0.0)
+
+    test.case("the apex of the unit hump has curvature one")
+    // (0,0), (1,1), (2,0) at t = 0.5: the formula's value is -1 exactly,
+    // the sign being the direction the curve turns.
+    test.assert_approx(curvequad.curvature(hump_quad(), 0.5), 0.0 - 1.0, 1e-12)
+    test.assert_approx(curvequad.curvature(hump_quad(), 0.0), 0.0 - math.sqrt(2.0) / 4.0,
+                       1e-12)
+
+    test.case("a cubic with an inflection changes the sign of its curvature")
+    // (0,0), (1,1), (2,-1), (3,0): the numerator is -3 + 6t, one root
+    // at t = 0.5, and the curvature crosses zero there.
+    let s = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                             curvepoint.pt(2.0, 0.0 - 1.0), curvepoint.pt(3.0, 0.0))
+    let roots = curvecubic.inflections(s)
+    test.assert(list.len(roots) == 1)
+    let at = list.get(roots, 0)
+    test.assert_approx(at, 0.5, 1e-12)
+    test.assert_approx(curvecubic.curvature(s, at), 0.0, 1e-12)
+    test.assert(curvecubic.curvature(s, 0.25) * curvecubic.curvature(s, 0.75) < 0.0)
+
+    test.case("a curve with no inflection says so")
+    test.assert(list.len(curvecubic.inflections(straight)) == 0)
+    test.assert(list.len(curvecubic.inflections(closed_cubic())) == 0)
+
+    test.case("a cubic that bends the other way is positive, and the sign survives elevation")
+    // The same curve twice.  As a quadratic, (0,0), (0.5,-1), (1,0) is
+    // y = 2t^2 - 2t over x = t — an upward-opening parabola walked in
+    // +x, so it turns anticlockwise and the doc's sign rule says the
+    // curvature is POSITIVE.  As a cubic it is the degree elevation of
+    // those three points, which is the same curve and must answer the
+    // same number.
+    //
+    // The number is 4 exactly: x' = 1 and y'' = 4 at the apex, so the
+    // numerator is 4, and the speed there is 1.
+    //
+    // The quadratic family's sign is pinned by the hump above; this is
+    // the cubic's, and it takes a curve that turns the positive way to
+    // pin it — the product test above is invariant under negating
+    // curvature, so it cannot.
+    let up_quad = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.5, 0.0 - 1.0),
+                                 curvepoint.pt(1.0, 0.0))
+    let up_cubic = curvecubic.cubic(curvepoint.pt(0.0, 0.0),
+                                    curvepoint.pt(1.0 / 3.0, 0.0 - 2.0 / 3.0),
+                                    curvepoint.pt(2.0 / 3.0, 0.0 - 2.0 / 3.0),
+                                    curvepoint.pt(1.0, 0.0))
+    test.assert(curvecubic.curvature(up_cubic, 0.5) > 0.0)
+    test.assert_approx(curvecubic.curvature(up_cubic, 0.5), 4.0, 1e-12)
+    test.assert_approx(curvequad.curvature(up_quad, 0.5), 4.0, 1e-12)
+
+@test
+fn test_flattening_gives_up_rather_than_never_terminating() [io]
+    // A tolerance the size of a continent's curve cannot be met, and
+    // being told beats a polyline that is quietly wrong or a ring that
+    // never returns.
+    test.case("a cubic whose size and tolerance disagree")
+    let huge = curvecubic.cubic(curvepoint.pt(0.0 - 1.0e12, 0.0),
+                                curvepoint.pt(0.0 - 1.0e12, 1.0e12),
+                                curvepoint.pt(1.0e12, 1.0e12),
+                                curvepoint.pt(1.0e12, 0.0))
+    match curvecubic.flatten(huge, 1.0)
+        Ok(_)  => test.fail("4096 segments cannot hold that")
+        Err(e) => test.assert(curvefault.code(e) == "flatten_limit_reached")
+    match curvecubic.flatten_count(huge, 1.0)
+        Ok(_)  => test.fail("4096 segments cannot hold that")
+        Err(e) =>
+            test.assert(curvefault.code(e) == "flatten_limit_reached")
+            // The ceiling is a named number and the refusal names it, so
+            // a caller sizing a work budget reads it rather than
+            // guessing.  Asserting the code alone lets the constant move
+            // by any amount unnoticed — this is the assertion that says
+            // the limit IS the documented 4096.
+            test.assert(str.ends_with(e.message(), "the limit is 4096"))
+    match curvecubic.flatten_count(huge, 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("a quadratic whose size and tolerance disagree")
+    let bigq = curvequad.quad(curvepoint.pt(0.0 - 1.0e12, 0.0),
+                              curvepoint.pt(0.0, 1.0e12),
+                              curvepoint.pt(1.0e12, 0.0))
+    match curvequad.flatten(bigq, 1.0)
+        Ok(_)  => test.fail("4096 segments cannot hold that")
+        Err(e) => test.assert(curvefault.code(e) == "flatten_limit_reached")
+    match curvequad.flatten(bigq, 0.0 - 1.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("an arc whose size and tolerance disagree")
+    let bigarc = curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0e9, 0.0, 2.0 * math.pi())
+    match curvearc.flatten(bigarc, 1.0e-9)
+        Ok(_)  => test.fail("4096 chords cannot hold that")
+        Err(e) => test.assert(curvefault.code(e) == "flatten_limit_reached")
+    match curvearc.flatten(bigarc, 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+    test.case("and a nearest point needs a positive tolerance in every family")
+    match curvequad.nearest_point(hump_quad(), curvepoint.pt(0.5, 0.5), 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+    match curvecubic.nearest_point(closed_cubic(), curvepoint.pt(0.5, 0.5), 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+    match curveseg.nearest_point(CurveSegLine(curvepoint.pt(0.0, 0.0),
+                                              curvepoint.pt(1.0, 0.0)),
+                                 curvepoint.pt(0.5, 0.5), 0.0 - 1.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+
+@test
+fn test_every_refusal_is_named_and_coded() [io]
+    // Eleven ways this package says no, each through the three
+    // answers a caller can ask for.  The whole enum is walked rather
+    // than the handful the other suites happen to raise: a variant
+    // with no code is a `match` that fell through, and nobody would
+    // notice until it reached a log.
+    var faults: [CurveFault] = [CurveToleranceNotPositive(0.0),
+         CurveArcLengthOutOfRange(9.0, 4.0),
+         CurveParameterOutOfRange(2.0),
+         CurveRangeInverted(0.7, 0.2),
+         CurveKnotCountWrong(3, 7),
+         CurveKnotsNotAscending(2),
+         CurveTooFewControlPoints(2, 4),
+         CurveDegreeOutOfRange(9),
+         CurveRadiusNotPositive(0.0, 1.0),
+         CurveTooFewKnotPoints(1),
+         CurveFlattenLimitReached(5000, 4096)]
+    test.assert(list.len(faults) == 11)
+
+    test.case("each one has a message and a short code")
+    for i in 0..list.len(faults)
+        let f = list.get(faults, i)
+        test.assert(f.message() != "")
+        test.assert(curvefault.code(f) != "")
+
+    test.case("the four a caller fixes by passing something else say so")
+    // The first four in the list above, in order, and nothing else.
+    for k in 0..4
+        test.assert(curvefault.is_argument_fault(list.get(faults, k)))
+    for j in 4..list.len(faults)
+        test.assert(not curvefault.is_argument_fault(list.get(faults, j)))
+
+    test.case("and the codes are the stable names")
+    test.assert(curvefault.code(CurveToleranceNotPositive(0.0)) == "tolerance_not_positive")
+    test.assert(curvefault.code(CurveArcLengthOutOfRange(1.0, 0.0)) == "arc_length_out_of_range")
+    test.assert(curvefault.code(CurveParameterOutOfRange(2.0)) == "parameter_out_of_range")
+    test.assert(curvefault.code(CurveRangeInverted(1.0, 0.0)) == "range_inverted")
+    test.assert(curvefault.code(CurveKnotCountWrong(1, 2)) == "knot_count_wrong")
+    test.assert(curvefault.code(CurveKnotsNotAscending(0)) == "knots_not_ascending")
+    test.assert(curvefault.code(CurveTooFewControlPoints(1, 4)) == "too_few_control_points")
+    test.assert(curvefault.code(CurveDegreeOutOfRange(0)) == "degree_out_of_range")
+    test.assert(curvefault.code(CurveRadiusNotPositive(0.0, 0.0)) == "radius_not_positive")
+    test.assert(curvefault.code(CurveTooFewKnotPoints(2)) == "too_few_knot_points")
+    test.assert(curvefault.code(CurveFlattenLimitReached(1, 2)) == "flatten_limit_reached")
+
+@test
+fn test_an_arc_is_the_same_arc_in_either_parameterisation() [io]
+    // SVG writes an arc by its endpoints and two flags and everything
+    // here works on a centre, so the conversion runs on every path a
+    // renderer takes.  The flags are the part that is easy to get
+    // wrong and impossible to see: the round trip is the cheap check
+    // that the arc the caller asked for is the arc they got.
+    test.case("all four flag combinations come back where they started")
+    var flags: [Bool] = [false, true]
+    for i in 0..2
+        for j in 0..2
+            let large = list.get(flags, i)
+            let sweep = list.get(flags, j)
+            let e = curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 3.0, 3.0, 0.0,
+                                          large, sweep, curvepoint.pt(2.0, 1.0))
+            match curvearc.to_center(e)
+                Err(f) => test.fail(f.message())
+                Ok(a)  =>
+                    let back = curvearc.to_endpoint(a)
+                    test.assert_approx(back.from.x, 0.0, 1e-9)
+                    test.assert_approx(back.from.y, 0.0, 1e-9)
+                    test.assert_approx(back.to.x, 2.0, 1e-9)
+                    test.assert_approx(back.to.y, 1.0, 1e-9)
+                    test.assert(back.rx == 3.0)
+                    test.assert(back.ry == 3.0)
+                    // The flags ARE the two halves of the sweep's
+                    // sign and size, which is what makes them
+                    // redundant with it and worth checking.
+                    test.assert((math.abs(a.sweep_angle) > math.pi()) == large)
+                    test.assert((a.sweep_angle > 0.0) == sweep)
+                    test.assert(not curvearc.is_full_turn(a))
+
+    test.case("radii too small to reach are scaled up until they do")
+    // Not a refusal: SVG scales both radii together, which silently
+    // changes the shape and is why the struct says so.
+    match curvearc.to_center(curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 1.0, 1.0,
+                                                   0.0, false, true,
+                                                   curvepoint.pt(10.0, 0.0)))
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            test.assert_approx(a.rx, 5.0, 1e-12)
+            test.assert_approx(a.ry, 5.0, 1e-12)
+            test.assert_approx(curvearc.eval(a, 0.0).x, 0.0, 1e-9)
+            test.assert_approx(curvearc.eval(a, 1.0).x, 10.0, 1e-9)
+            // Halfway round a half turn is beside the centre, at the
+            // radius it was scaled to.
+            test.assert_approx(curvearc.eval(a, 0.5).x, 5.0, 1e-9)
+            test.assert_approx(curvepoint.distance(a.center, curvearc.eval(a, 0.5)),
+                               5.0, 1e-9)
+
+    test.case("an arc from a point to itself is empty rather than a division")
+    match curvearc.to_center(curvearc.endpoint_arc(curvepoint.pt(3.0, 4.0), 2.0, 2.0,
+                                                   0.0, true, true,
+                                                   curvepoint.pt(3.0, 4.0)))
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            test.assert(a.sweep_angle == 0.0)
+            test.assert_approx(a.center.x, 3.0, 1e-12)
+            test.assert_approx(a.center.y, 4.0, 1e-12)
+            test.assert(not math.is_nan(curvearc.eval(a, 0.5).x))
+            test.assert(not math.is_nan(curvearc.eval(a, 0.5).y))
+
+    test.case("a zero radius is refused rather than drawn as a line")
+    match curvearc.to_center(curvearc.endpoint_arc(curvepoint.pt(0.0, 0.0), 0.0, 1.0,
+                                                   0.0, false, true,
+                                                   curvepoint.pt(2.0, 0.0)))
+        Ok(_)  => test.fail("a zero radius is not an arc")
+        Err(f) => test.assert(curvefault.code(f) == "radius_not_positive")
+
+    test.case("and a centre arc with a zero radius is still answerable")
+    // `center_arc` does not go through the conversion, so this is
+    // constructible; every operation on it has to stay a number.
+    let flat = curvearc.center_arc(curvepoint.pt(0.0, 0.0), 0.0, 1.0, 0.0, 0.0, 1.0)
+    test.assert(not math.is_nan(curvearc.eval(flat, 0.5).x))
+    test.assert(curvearc.cubic_error(flat) == 0.0)
+    let still = curvearc.center_arc(curvepoint.pt(0.0, 0.0), 1.0, 1.0, 0.0, 0.0, 0.0)
+    test.assert(curvearc.cubic_error(still) == 0.0)
+    // A zero sweep is a point, and the pieces that carry it are
+    // degenerate rather than absent.
+    let pieces = curvearc.to_cubics(still)
+    test.assert(list.len(pieces) >= 1)
+    let only = list.get(pieces, 0)
+    test.assert(only.p0.x == only.p3.x and only.p0.y == only.p3.y)
+
+    test.case("the bounds contain the curve, whatever the sweep and the sign")
+    // A tilted ellipse reaches furthest along x and y at angles that
+    // are NOT quarter turns, so a bounds that looks only at the axis
+    // angles cuts the curve it is bounding.  The tilted full ellipse
+    // has a closed form: its half-width is sqrt(rx^2 cos^2 + ry^2
+    // sin^2) at 45 degrees, which is sqrt(2.5) either way.
+    var arcs: [CurveArcCenter] = [quarter(),
+         curvearc.circular(curvepoint.pt(1.0, 1.0), 1.0, 0.0, 0.0 - 1.0),
+         curvearc.circular(curvepoint.pt(1.0, 1.0), 1.0, 5.0, 2.0),
+         curvearc.circular(curvepoint.pt(1.0, 1.0), 1.0, 19.0, 2.0),
+         curvearc.circular(curvepoint.pt(1.0, 1.0), 1.0, 8.0, 0.0 - 5.0),
+         curvearc.circular(curvepoint.pt(1.0, 1.0), 1.0, 0.0, 7.0),
+         curvearc.ellipse(curvepoint.pt(0.0, 0.0), 2.0, 1.0, math.pi() / 4.0)]
+    for i in 0..list.len(arcs)
+        let a = list.get(arcs, i)
+        let box = curvearc.bounds(a)
+        var k = 0
+        while k <= 32
+            let p = curvearc.eval(a, k as Float / 32.0)
+            test.assert(p.x >= box.x - 1e-9 and p.x <= box.x + box.width + 1e-9)
+            test.assert(p.y >= box.y - 1e-9 and p.y <= box.y + box.height + 1e-9)
+            k = k + 1
+    test.assert_approx(curvearc.bounds(curvearc.ellipse(curvepoint.pt(0.0, 0.0),
+                                                        2.0, 1.0, math.pi() / 4.0)).width,
+                       math.sqrt(10.0), 1e-12)
+    test.assert(curvearc.is_full_turn(curvearc.ellipse(curvepoint.pt(0.0, 0.0),
+                                                       2.0, 1.0, 0.0)))
+    test.assert(not curvearc.is_full_turn(quarter()))
+    test.assert(curvearc.is_full_turn(curvearc.circular(curvepoint.pt(1.0, 1.0),
+                                                        1.0, 0.0, 7.0)))
+
+    test.case("a transformed arc is the arc, mapped point for point")
+    // However the transform is spelled internally — the radii and the
+    // tilt move, and a reflection comes out swept the other way — what
+    // a caller draws is the mapped points at the same parameters.
+    let mirror = geomxform.scaling(1.0, 0.0 - 1.0)
+    let mirrored = curvearc.transform(quarter(), mirror)
+    let stretch = geomxform.scaling(2.0, 1.0)
+    let stretched = curvearc.transform(quarter(), stretch)
+    // This quarter has radius two, so doubling x doubles that radius.
+    test.assert(stretched.rx == 4.0)
+    test.assert(stretched.ry == 2.0)
+    var k = 0
+    while k <= 8
+        let u = k as Float / 8.0
+        let p = curvearc.eval(quarter(), u)
+        let m = curvearc.eval(mirrored, u)
+        let s = curvearc.eval(stretched, u)
+        test.assert_approx(m.x, p.x, 1e-9)
+        test.assert_approx(m.y, 0.0 - p.y, 1e-9)
+        test.assert_approx(s.x, 2.0 * p.x, 1e-9)
+        test.assert_approx(s.y, p.y, 1e-9)
+        k = k + 1
+
+    test.case("and the flattening is as flat as its tolerance claims")
+    // The claim: every chord's midpoint is within the tolerance of the
+    // circle.  Up to the error of the cubic pieces being flattened,
+    // which is what `cubic_error` reports and what `tol_cubics` would
+    // have to be asked about.
+    let a = quarter()
+    let slack = curvearc.cubic_error(a) + 1e-9
+    match curvearc.flatten(a, 0.01)
+        Err(e)  => test.fail(e.message())
+        Ok(pts) =>
+            test.assert(list.len(pts) > 2)
+            test.assert_approx(curvearc.eval(a, 0.0).x, list.get(pts, 0).x, 1e-9)
+            test.assert_approx(curvearc.eval(a, 1.0).y,
+                               list.get(pts, list.len(pts) - 1).y, 1e-9)
+            for i in 1..list.len(pts)
+                let p = list.get(pts, i - 1)
+                let q = list.get(pts, i)
+                let mid = curvepoint.pt((p.x + q.x) / 2.0, (p.y + q.y) / 2.0)
+                let r = curvepoint.distance(a.center, mid)
+                test.assert(r >= a.rx - 0.01 - slack)
+                test.assert(r <= a.rx + slack)
+
+@test
+fn test_a_spline_is_its_knot_vector() [io]
+    // A B-spline IS its knot vector, so the cases worth pinning are the
+    // legal vectors that leave the evaluator nothing to interpolate: an
+    // empty domain, an index that is not a control, and a spacing rule
+    // asked for by name.
+    test.case("a spline's derivative is the difference of its own eval")
+    match curvespline.clamped_bspline(bump_points(), 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            test.assert(curvespline.segment_count(b) == 2)
+            var k = 1
+            while k <= 9
+                let t = k as Float / 10.0
+                let h = 1e-6
+                let d = curvespline.derivative(b, t)
+                let lo = curvespline.eval(b, t - h)
+                let hi = curvespline.eval(b, t + h)
+                test.assert_approx(d.dx, (hi.x - lo.x) / (2.0 * h), 1e-5)
+                test.assert_approx(d.dy, (hi.y - lo.y) / (2.0 * h), 1e-5)
+                k = k + 1
+
+    test.case("the clamped knots repeat once per end control")
+    let knots = curvespline.clamped_knots(5, 3)
+    test.assert(list.len(knots) == 9)
+    test.assert(list.get(knots, 0) == 0.0)
+    test.assert(list.get(knots, 3) == 0.0)
+    test.assert(list.get(knots, 4) == 0.5)
+    test.assert(list.get(knots, 5) == 1.0)
+    test.assert(list.get(knots, 8) == 1.0)
+
+    test.case("moving a control moves only the spans that control reaches")
+    let six = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 2.0),
+               curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 2.0),
+               curvepoint.pt(4.0, 0.0), curvepoint.pt(5.0, 2.0)]
+    match curvespline.clamped_bspline(six, 3)
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            test.assert(curvespline.segment_count(b) == 3)
+            let touched = curvespline.affected_segments(b, 0)
+            test.assert(list.len(touched) == 1)
+            test.assert(list.get(touched, 0) == 0)
+            match curvespline.move_control(b, 0, curvepoint.pt(0.0, 3.0))
+                Err(e) => test.fail(e.message())
+                Ok(m)  =>
+                    // A move is a fresh spline, and the one it came
+                    // from keeps the control it was built with.
+                    test.assert(list.get(b.controls, 0).y == 0.0)
+                    test.assert(list.get(m.controls, 0).y == 3.0)
+                    test.assert(curvespline.eval(b, 0.0).y == 0.0)
+                    test.assert(curvespline.eval(m, 0.0).y == 3.0)
+                    // Past the first span, control zero is gone: this
+                    // is what makes a spline editable.
+                    var k = 4
+                    while k <= 12
+                        let t = k as Float / 12.0
+                        test.assert_approx(curvespline.eval(m, t).x,
+                                           curvespline.eval(b, t).x, 1e-12)
+                        test.assert_approx(curvespline.eval(m, t).y,
+                                           curvespline.eval(b, t).y, 1e-12)
+                        k = k + 1
+            match curvespline.move_control(b, 6, curvepoint.pt(9.0, 9.0))
+                Ok(_)  => test.fail("there is no seventh control")
+                Err(e) => test.assert(curvefault.code(e) == "parameter_out_of_range")
+            test.assert(list.len(curvespline.affected_segments(b, 6)) == 0)
+            test.assert(list.len(curvespline.affected_segments(b, 0 - 1)) == 0)
+
+    test.case("a knot vector that falls is refused, naming the index")
+    let four = [curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                curvepoint.pt(2.0, 0.0), curvepoint.pt(3.0, 1.0)]
+    match curvespline.bspline(four, 3, [0.0, 0.0, 0.0, 0.0, 0.6, 0.4, 1.0, 1.0])
+        Ok(_)  => test.fail("0.4 is below 0.6")
+        Err(e) =>
+            test.assert(curvefault.code(e) == "knots_not_ascending")
+            test.assert(e.message() == "knot vector falls at index 5")
+            // A knot vector is the curve's shape, not a bad argument.
+            test.assert(not curvefault.is_argument_fault(e))
+
+    test.case("a spline whose knots leave no span still answers")
+    match curvespline.bspline(four, 3,
+                              [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            // Domain `0 ..= 0`: no span to evaluate, so the answer is
+            // the first control rather than a refusal or a NaN.
+            test.assert(curvespline.segment_count(b) == 0)
+            test.assert(curvespline.eval(b, 0.5).x == 0.0)
+            test.assert(curvespline.eval(b, 0.5).y == 0.0)
+            test.assert(curvespline.derivative(b, 0.5).dx == 0.0)
+            test.assert(curvespline.derivative(b, 0.5).dy == 0.0)
+            test.assert(list.len(curvespline.to_cubics(b)) == 0)
+
+    test.case("all three spacing rules interpolate the same knots")
+    let knots_at = [curvepoint.pt(1.0, 1.0), curvepoint.pt(2.0, 0.0),
+                    curvepoint.pt(3.0, 1.0)]
+    match curvespline.catmull_rom_with(bump_points(), CurveAlphaUniform)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            // Uniform is one of the two rules that can cusp.
+            test.assert(curvespline.may_self_intersect(s))
+            let cubics = curvespline.catmull_to_cubics(s)
+            test.assert(list.len(cubics) == 2)
+            for k in 0..3
+                let w = list.get(knots_at, k)
+                let p = curvespline.catmull_eval(s, k as Float / 2.0)
+                test.assert_approx(p.x, w.x, 1e-9)
+                test.assert_approx(p.y, w.y, 1e-9)
+            // The cubic pieces ARE the spline, segment by segment.
+            for seg in 0..list.len(cubics)
+                var u = 0.0
+                while u <= 1.0
+                    let a = curvecubic.eval(list.get(cubics, seg), u)
+                    let w = curvespline.catmull_eval(
+                        s, (seg as Float + u) / list.len(cubics) as Float)
+                    test.assert_approx(a.x, w.x, 1e-9)
+                    test.assert_approx(a.y, w.y, 1e-9)
+                    u = u + 0.25
+            // Outside its knots the parameter is clamped, not refused.
+            test.assert(curvespline.catmull_eval(s, 0.0 - 3.0).x ==
+                        curvespline.catmull_eval(s, 0.0).x)
+            test.assert(curvespline.catmull_eval(s, 3.0).y ==
+                        curvespline.catmull_eval(s, 1.0).y)
+
+    match curvespline.catmull_rom_with(bump_points(), CurveAlphaChordal)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            test.assert(curvespline.may_self_intersect(s))
+            for k in 0..3
+                let w = list.get(knots_at, k)
+                let p = curvespline.catmull_eval(s, k as Float / 2.0)
+                test.assert_approx(p.x, w.x, 1e-9)
+                test.assert_approx(p.y, w.y, 1e-9)
+
+    test.case("centripetal is the rule that cannot cusp")
+    match curvespline.catmull_rom(bump_points())
+        Err(e) => test.fail(e.message())
+        Ok(s)  => test.assert(not curvespline.may_self_intersect(s))
+
+    test.case("a Catmull-Rom too small to have a segment still answers")
+    let one = CurveCatmull { points: [curvepoint.pt(3.0, 4.0)],
+                             alpha: CurveAlphaCentripetal }
+    test.assert(curvespline.catmull_eval(one, 0.5).x == 3.0)
+    test.assert(curvespline.catmull_eval(one, 0.5).y == 4.0)
+    test.assert(list.len(curvespline.catmull_to_cubics(one)) == 0)
+
+@test
+fn test_the_quadratic_at_its_own_corners() [io]
+    // Each extrema, root and clamp of a quadratic is one closed form.
+    // The three here that a happy path never reaches are the ones where
+    // that form is singular: a dropped root outside the domain, a
+    // degenerate chord, and a logarithm whose argument is zero.
+    test.case("an extremum outside the domain is dropped, not clamped")
+    let ray = curvequad.bounds(curvequad.quad(curvepoint.pt(0.0, 0.0),
+                                              curvepoint.pt(1.0, 0.0),
+                                              curvepoint.pt(3.0, 0.0)))
+    // The extremum of this one is at -1, and the box is still the two
+    // ends: a clamped root would not change it either, an evaluated one
+    // would make the width 4.
+    test.assert(ray.x == 0.0)
+    test.assert(ray.y == 0.0)
+    test.assert(ray.width == 3.0)
+    test.assert(ray.height == 0.0)
+
+    test.case("a box around a curve that turns back in both axes")
+    // The extremum in x and in y are at the same parameter, so the
+    // second one is a root already in the list.
+    let bow = curvequad.bounds(curvequad.quad(curvepoint.pt(0.0, 0.0),
+                                              curvepoint.pt(1.0, 1.0),
+                                              curvepoint.pt(0.0, 0.0)))
+    test.assert_approx(bow.width, 0.5, 1e-12)
+    test.assert_approx(bow.height, 0.5, 1e-12)
+    test.assert_approx(bow.x, 0.0, 1e-12)
+    test.assert_approx(bow.y, 0.0, 1e-12)
+    // The apex is on the box's far corner, because the control point at
+    // 1 is twice as far out as the curve goes.
+    test.assert_approx(curvequad.eval(
+        curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 1.0),
+                       curvepoint.pt(0.0, 0.0)),
+                       0.5).x,
+                       0.5, 1e-12)
+
+    test.case("flattening a curve whose chord is a point")
+    match curvequad.flatten(fold_quad(), 0.01)
+        Err(e)  => test.fail(e.message())
+        Ok(pts) =>
+            // The chord from p0 to p2 has no length, so the flatness
+            // test is the distance to p0 rather than a division by it.
+            test.assert(list.len(pts) >= 3)
+            test.assert(list.get(pts, 0).x == 0.0)
+            let last = list.get(pts, list.len(pts) - 1)
+            test.assert(last.x == 0.0)
+            test.assert(last.y == 0.0)
+
+    test.case("an arc length whose logarithm has a zero argument")
+    // A curve out to (1, 0) and back to a point 1.2e-8 to its side: the
+    // two arguments of the closed form's logarithm underflow to zero
+    // here, and the answer is the polynomial part rather than a NaN.
+    let hairpin = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+                                 curvepoint.pt(1.0, 0.000000012))
+    let len = curvequad.arc_length(hairpin)
+    test.assert(not math.is_nan(len))
+    test.assert(len >= 0.99)
+    test.assert(len <= 2.0000001)
+
+    test.case("the nearest point on a curve that is a single point")
+    let dot = curvepoint.pt(2.0, 3.0)
+    let still = curvequad.quad(dot, dot, dot)
+    match curvequad.nearest_point(still, curvepoint.pt(0.0, 0.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 0.0)
+            test.assert(p.point.x == 2.0)
+            test.assert_approx(p.distance, math.sqrt(13.0), 1e-12)
+
+    test.case("a query whose condition is a perfect cube")
+    // `4t^3 - 6t^2 + 3t - 0.5` is `4(t - 0.5)^3`: one triple root, at
+    // the apex, and the apex is where the nearest point is.
+    match curvequad.nearest_point(hump_quad(), curvepoint.pt(1.0, 0.0 - 0.5), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 0.5)
+            test.assert(p.point.x == 1.0)
+            test.assert(p.point.y == 0.5)
+            test.assert(p.distance == 1.0)
+
+    test.case("a query whose condition has three real roots")
+    // On the hump's axis the condition is symmetric, so two of its
+    // three roots are mirror images at equal distance and the ends are
+    // farther than both: 1.2247 against 1.25.
+    match curvequad.nearest_point(hump_quad(), curvepoint.pt(1.0, 0.0 - 0.75), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t > 0.0)
+            test.assert(p.t < 1.0)
+            test.assert(p.distance < math.sqrt(1.5625))
+            // The two candidates are `0.5 -/+ sqrt(2)/4`.
+            test.assert_approx(math.abs(p.t - 0.5), math.sqrt(2.0) / 4.0, 1e-9)
+            test.assert_approx(p.distance, math.sqrt(1.5), 1e-9)
+            // And it is an interior minimum, which is to say the
+            // segment meets the line back to the query at a right
+            // angle.
+            let vx = p.point.x - 1.0
+            let vy = p.point.y - (0.0 - 0.75)
+            let d = curvequad.derivative(hump_quad(), p.t)
+            test.assert_approx(vx * d.dx + vy * d.dy, 0.0, 1e-6)
+
+    test.case("the nearest point of a query past the far end")
+    match curvequad.nearest_point(hump_quad(), curvepoint.pt(3.0, 0.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 1.0)
+            test.assert(p.point.x == 2.0)
+            test.assert(p.point.y == 0.0)
+            test.assert_approx(p.distance, 1.0, 1e-12)
+
+    test.case("a line that cuts the hump twice, and one that misses it")
+    let below = curvequad.intersect_line(hump_quad(), curvepoint.pt(0.0, 0.25),
+                                         curvepoint.pt(2.0, 0.25))
+    test.assert(list.len(below) == 2)
+    let t0 = list.get(below, 0).t
+    let t1 = list.get(below, 1).t
+    // The hump is symmetric about its apex, so the two crossings are
+    // mirror images: both in parameter and in x.
+    test.assert_approx(t0 + t1, 1.0, 1e-9)
+    test.assert_approx(list.get(below, 0).point.x + list.get(below, 1).point.x,
+                       2.0, 1e-9)
+    test.assert_approx(list.get(below, 0).point.y, 0.25, 1e-9)
+    test.assert_approx(list.get(below, 1).point.y, 0.25, 1e-9)
+    // A line above it has no real crossing at all.
+    test.assert(list.len(curvequad.intersect_line(
+        hump_quad(), curvepoint.pt(0.0, 5.0), curvepoint.pt(2.0, 5.0))) == 0)
+
+    test.case("a line through one point and back crosses nothing")
+    let p = curvepoint.pt(1.0, 1.0)
+    test.assert(list.len(curvequad.intersect_line(hump_quad(), p, p)) == 0)
+
+    test.case("the inverse of a length, at every corner of the search")
+    match curvequad.t_for_length(hump_quad(), 1.0, 0.0)
+        Ok(_)  => test.fail("a tolerance of zero is not a tolerance")
+        Err(e) => test.assert(curvefault.code(e) == "tolerance_not_positive")
+    // A curve that has covered nothing: equal lengths in equal steps.
+    let dot = curvepoint.pt(1.0, 1.0)
+    let still = curvequad.quad(dot, dot, dot)
+    match curvequad.t_for_length(still, 0.0, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert(t == 0.0)
+    // A cusp: the speed is exactly zero at the parameter the length
+    // half covers, and the closed form hits the length exactly there, so
+    // that parameter is the answer rather than a Newton step divided by
+    // zero.
+    match curvequad.t_for_length(fold_quad(), 0.5, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert(t == 0.5)
+
+    test.case("a Newton step that would leave the domain is replaced by a bisection")
+    // `quad((0,0), (-2,0), (-1,0))` turns at t = 2/3 and its length
+    // function is `4t - 3t*t`, which is 1.0 at 1/3 — the Newton step
+    // from the ratio 0.6 lands at -1.4, outside the bracket, and the
+    // search bisects instead.
+    let out_back = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0 - 2.0, 0.0),
+                                  curvepoint.pt(0.0 - 1.0, 0.0))
+    match curvequad.t_for_length(out_back, 1.0, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert_approx(t, 1.0 / 3.0, 1e-9)
+            match curvequad.segment(out_back, 0.0, t)
+                Err(e)   => test.fail(e.message())
+                Ok(head) =>
+                    test.assert_approx(curvequad.arc_length(head), 1.0, 1e-9)
+    // The same length on a curve that turns the other way: the step
+    // overshoots past 1, outside the bracket, and is bisected the same
+    // way.
+    let out_front = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0 - 2.0, 0.0),
+                                   curvepoint.pt(1.0, 0.0))
+    match curvequad.t_for_length(out_front, 1.0, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert_approx(t, 0.6, 1e-9)
+            match curvequad.segment(out_front, 0.0, t)
+                Err(e)   => test.fail(e.message())
+                Ok(head) =>
+                    test.assert_approx(curvequad.arc_length(head), 1.0, 1e-9)
+
+    test.case("a tolerance below what an iteration can deliver")
+    // No step or bracket reaches 1e-30 near a cusp unless it reaches
+    // zero, so the search runs until one does or its 64 turns are spent,
+    // and answers with the value it reached.  It is still the right
+    // value: this curve's length is `4t - 4t*t`, so the answer is the
+    // closed form `1/2 - sqrt(16/3)/8`.
+    let fold = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0 - 2.0, 0.0),
+                              curvepoint.pt(0.0, 0.0))
+    match curvequad.t_for_length(fold, 2.0 / 3.0, 1e-30)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(t >= 0.0)
+            test.assert(t <= 1.0)
+            test.assert_approx(t, 0.5 - math.sqrt(16.0 / 3.0) / 8.0, 1e-9)
+
+@test
+fn test_a_segment_answers_at_its_ends_and_across_its_angles() [io]
+    // A line's nearest point is a projection and an arc's is a search
+    // over angles, so each has ends to clamp and — for the arc — a
+    // circular parameterisation that has to be wound onto the sweep.
+    let up = CurveSegArc(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0,
+                                           math.pi() / 2.0))
+    test.case("a projection before the start and past the end is clamped")
+    let base = CurveSegLine(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+    match curveseg.nearest_point(base, curvepoint.pt(0.0 - 2.0, 1.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 0.0)
+            test.assert(p.point.x == 0.0)
+            // (0, 0) is the nearest point of the segment, and the
+            // distance is to it rather than to the line.
+            test.assert_approx(p.distance, math.sqrt(5.0), 1e-12)
+    match curveseg.nearest_point(base, curvepoint.pt(9.0, 0.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 1.0)
+            test.assert(p.point.x == 4.0)
+            test.assert_approx(p.distance, 5.0, 1e-12)
+
+    test.case("a quarter turn of no sweep has no crossing to report")
+    let still = CurveSegArc(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 0.0))
+    test.assert(list.len(curveseg.intersect_line(still, curvepoint.pt(0.5, 0.0 - 2.0),
+                                                 curvepoint.pt(0.5, 2.0))) == 0)
+
+    test.case("a line crossing a quarter is answered in the quarter's angles")
+    // x = 0.5 meets the circle at plus and minus pi/3, and only one of
+    // those is on this quarter: the other has to be wound a turn away
+    // and then rejected.
+    let hits = curveseg.intersect_line(up, curvepoint.pt(0.5, 0.0 - 2.0),
+                                       curvepoint.pt(0.5, 2.0))
+    test.assert(list.len(hits) == 1)
+    test.assert_approx(list.get(hits, 0).t, 2.0 / 3.0, 1e-9)
+    test.assert_approx(list.get(hits, 0).point.x, 0.5, 1e-9)
+    // The same quarter described from a whole turn below: the wind has
+    // to subtract as well as add.
+    let below = CurveSegArc(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0,
+                                              0.0 - 2.0 * math.pi(), math.pi() / 2.0))
+    let wound = curveseg.intersect_line(below, curvepoint.pt(0.5, 0.0 - 2.0),
+                                        curvepoint.pt(0.5, 2.0))
+    test.assert(list.len(wound) == 1)
+    test.assert_approx(list.get(wound, 0).t, 2.0 / 3.0, 1e-9)
+
+    test.case("a backward arc answers backward")
+    let down = CurveSegArc(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0,
+                                             0.0 - math.pi() / 2.0))
+    let back = curveseg.intersect_line(down, curvepoint.pt(0.5, 0.0 - 2.0),
+                                       curvepoint.pt(0.5, 2.0))
+    test.assert(list.len(back) == 1)
+    test.assert_approx(list.get(back, 0).t, 2.0 / 3.0, 1e-9)
+    test.assert_approx(list.get(back, 0).point.y, 0.0 - math.sqrt(3.0) / 2.0, 1e-9)
+    // And one described from a turn and a half above, whose crossings
+    // arrive below the range and have to be wound up to it.
+    let high = CurveSegArc(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0,
+                                             3.0 * math.pi(), 0.0 - math.pi() / 2.0))
+    let far = curveseg.intersect_line(high, curvepoint.pt(0.0 - 0.5, 0.0 - 2.0),
+                                      curvepoint.pt(0.0 - 0.5, 2.0))
+    test.assert(list.len(far) == 1)
+    test.assert_approx(list.get(far, 0).t, 2.0 / 3.0, 1e-9)
+    test.assert_approx(list.get(far, 0).point.x, 0.0 - 0.5, 1e-9)
+
+    test.case("an arc's search window is clamped at its ends too")
+    match curveseg.nearest_point(up, curvepoint.pt(0.0 - 2.0, 0.0 - 2.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t <= 1e-6)
+            test.assert_approx(p.point.x, 1.0, 1e-6)
+            test.assert_approx(p.point.y, 0.0, 1e-6)
+    match curveseg.nearest_point(up, curvepoint.pt(0.0, 3.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t >= 1.0 - 1e-6)
+            test.assert_approx(p.point.x, 0.0, 1e-6)
+            test.assert_approx(p.point.y, 1.0, 1e-6)
+
+    test.case("an arc with no radius, and a line with no direction")
+    let flat = CurveSegArc(curvearc.center_arc(curvepoint.pt(0.0, 0.0), 0.0, 0.0,
+                                               0.0, 0.0, 1.0))
+    test.assert(list.len(curveseg.intersect_line(flat, curvepoint.pt(0.0 - 1.0, 0.0),
+                                                 curvepoint.pt(1.0, 0.0))) == 0)
+    let dot = curvepoint.pt(1.0, 1.0)
+    test.assert(list.len(curveseg.intersect_line(up, dot, dot)) == 0)
+    test.assert(list.len(curveseg.intersect_line(up, curvepoint.pt(5.0, 0.0 - 1.0),
+                                                 curvepoint.pt(5.0, 1.0))) == 0)
+
+    test.case("a distance picks whichever closed form the kind has")
+    let straight = curvequad.quad(curvepoint.pt(0.0, 0.0), curvepoint.pt(1.0, 0.0),
+                                  curvepoint.pt(2.0, 0.0))
+    match curveseg.point_at_distance([CurveSegQuad(straight)], 0.5, 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(found) =>
+            test.assert(found.0 == 0)
+            test.assert_approx(found.1.x, 0.5, 1e-12)
+    let straight_cubic = curvecubic.line(curvepoint.pt(0.0, 0.0),
+                                         curvepoint.pt(3.0, 4.0))
+    match curveseg.point_at_distance([CurveSegCubic(straight_cubic)], 1.0, 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(found) =>
+            test.assert(found.0 == 0)
+            test.assert_approx(found.1.x, 0.6, 1e-12)
+            test.assert_approx(found.1.y, 0.8, 1e-12)
+
+    test.case("an arc at a distance, on a circle and on an ellipse")
+    let quarter = curvearc.circular(curvepoint.pt(0.0, 0.0), 2.0, 0.0, math.pi() / 2.0)
+    // Exactly the arc's length is its end, and not a refusal.
+    match curveseg.point_at_distance([CurveSegArc(quarter)], math.pi(), 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(found) =>
+            test.assert(found.0 == 0)
+            test.assert_approx(found.1.x, 0.0, 1e-9)
+            test.assert_approx(found.1.y, 2.0, 1e-9)
+    // Half of it is a ratio, because a circle's length is its angle.
+    match curveseg.point_at_distance([CurveSegArc(quarter)], math.pi() / 2.0, 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(found) =>
+            test.assert(found.0 == 0)
+            test.assert_approx(found.1.x, math.sqrt(2.0), 1e-9)
+            test.assert_approx(found.1.y, math.sqrt(2.0), 1e-9)
+    // An ellipse has no ratio, so the distance is bisected — and the
+    // answer is still a point of the ellipse.
+    let across = curvearc.center_arc(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0,
+                                     0.0, math.pi() / 2.0)
+    match curveseg.arc_length(CurveSegArc(across), 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(total) =>
+            match curveseg.point_at_distance([CurveSegArc(across)],
+                                             total / 2.0, 1e-9)
+                Err(e)    => test.fail(e.message())
+                Ok(found) =>
+                    test.assert(found.1.x > 0.0)
+                    test.assert(found.1.y > 0.0)
+                    test.assert_approx(found.1.x * found.1.x / 4.0 +
+                                       found.1.y * found.1.y,
+                                       1.0, 1e-6)
+                    // This ellipse is twice as wide as it is tall, so
+                    // its speed grows with the angle: the halfway
+                    // length is past the halfway angle.
+                    test.assert(math.atan2(found.1.y, found.1.x / 2.0) >
+                                math.pi() / 4.0)
+
+    test.case("a zero-length arc, and a distance that is not one")
+    let vanished = CurveSegArc(curvearc.center_arc(curvepoint.pt(4.0, 5.0), 0.0, 0.0,
+                                                   0.0, 0.0, 1.0))
+    match curveseg.point_at_distance([vanished], 0.0, 1e-9)
+        Err(e)    => test.fail(e.message())
+        Ok(found) =>
+            test.assert(found.0 == 0)
+            test.assert(found.1.x == 4.0)
+            test.assert(found.1.y == 5.0)
+    match curveseg.point_at_distance([vanished], 1.0, 1e-9)
+        Ok(_)  => test.fail("that arc has no length to travel")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+    match curveseg.point_at_distance([up], 0.0 - 1.0, 1e-9)
+        Ok(_)  => test.fail("a negative distance is not a distance")
+        Err(e) => test.assert(curvefault.code(e) == "arc_length_out_of_range")
+
+@test
+fn test_a_cubic_that_is_not_a_line_uses_the_general_search() [io]
+    // A straight cubic has a ratio for its lengths, a projection for
+    // its nearest point and an empty hull of inflection points;
+    // everything else goes through a quartic root solver, a bisection,
+    // a Newton iteration and a search.  These are those lines.
+    let arch = curvecubic.cubic(curvepoint.pt(0.0, 0.0), curvepoint.pt(0.0, 1.0),
+                                curvepoint.pt(1.0, 1.0), curvepoint.pt(1.0, 0.0))
+    test.case("a curve that starts on the line is a root at its start")
+    let start_hit = curvecubic.intersect_line(arch, curvepoint.pt(0.0, 0.0 - 1.0),
+                                              curvepoint.pt(0.0, 1.0))
+    test.assert(list.len(start_hit) == 1)
+    test.assert(list.get(start_hit, 0).t == 0.0)
+    test.assert(list.get(start_hit, 0).point.x == 0.0)
+    test.assert(list.get(start_hit, 0).point.y == 0.0)
+
+    test.case("a root the bisection lands on exactly is one hit")
+    // Dyadic controls, so the crossing polynomial is exactly
+    // `3t - 3/64` and the first midpoint of the first bracket is a
+    // root rather than near one.
+    let exact = curvecubic.cubic(curvepoint.pt(0.0, 0.0 - 0.046875),
+                                 curvepoint.pt(0.25, 0.953125),
+                                 curvepoint.pt(0.75, 1.953125),
+                                 curvepoint.pt(1.0, 2.953125))
+    let hits = curvecubic.intersect_line(exact, curvepoint.pt(0.0, 0.0),
+                                         curvepoint.pt(1.0, 0.0))
+    test.assert(list.len(hits) == 1)
+    test.assert(list.get(hits, 0).t == 1.0 / 64.0)
+    test.assert(list.get(hits, 0).point.y == 0.0)
+
+    test.case("the second derivative at an end is the end difference")
+    let at0 = curvecubic.second_derivative(arch, 0.0)
+    test.assert_approx(at0.dx, 6.0 * (0.0 - 0.0 + 1.0), 1e-12)
+    test.assert_approx(at0.dy, 6.0 * (0.0 - 2.0 + 1.0), 1e-12)
+    let at1 = curvecubic.second_derivative(arch, 1.0)
+    test.assert_approx(at1.dx, 6.0 * (0.0 - 2.0 + 1.0), 1e-12)
+    test.assert_approx(at1.dy, 6.0 * (1.0 - 2.0 + 0.0), 1e-12)
+    // Between the ends it is linear, and that is what the two ends of
+    // the curve's second derivative are.
+    let mid = curvecubic.second_derivative(arch, 0.5)
+    test.assert_approx(mid.dx, (at0.dx + at1.dx) / 2.0, 1e-12)
+    test.assert_approx(mid.dy, (at0.dy + at1.dy) / 2.0, 1e-12)
+    let straight = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(3.0, 4.0))
+    test.assert(curvecubic.second_derivative(straight, 0.0).dx == 0.0)
+    test.assert(curvecubic.second_derivative(straight, 1.0).dy == 0.0)
+
+    test.case("a length inside a curve that is not a line, inverted")
+    match curvecubic.t_for_length(arch, 1.0, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(t > 0.0)
+            test.assert(t < 1.0)
+            // The claim is the inverse of the length: the head up to
+            // the answer has the length that was asked for.
+            let head = curvecubic.subdivide(arch, t)
+            match curvecubic.arc_length(head.0, 1e-9)
+                Err(e)  => test.fail(e.message())
+                Ok(len) => test.assert_approx(len, 1.0, 1e-6)
+
+    test.case("a line's nearest point is a projection, clamped at the ends")
+    let march = curvecubic.line(curvepoint.pt(0.0, 0.0), curvepoint.pt(4.0, 0.0))
+    match curvecubic.nearest_point(march, curvepoint.pt(0.0 - 1.0, 2.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 0.0)
+            test.assert(p.point.x == 0.0)
+            test.assert_approx(p.distance, math.sqrt(5.0), 1e-12)
+
+    test.case("an end wins the search when it is the nearest")
+    match curvecubic.nearest_point(arch, curvepoint.pt(6.0, 0.0), 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert(p.t == 1.0)
+            test.assert(p.point.x == 1.0)
+            test.assert(p.point.y == 0.0)
+            test.assert_approx(p.distance, 5.0, 1e-9)
+
+    test.case("a line through one point and back crosses a cubic nowhere")
+    let p = curvepoint.pt(1.0, 1.0)
+    test.assert(list.len(curvecubic.intersect_line(arch, p, p)) == 0)
+
+@test
+fn test_the_small_helpers_are_still_answerable() [io]
+    test.case("a box around points whose smallest x comes last")
+    // Three points, so the smallest x is neither the first nor the
+    // last: `1, -1, 5` is the box, and not the box of the ends.
+    let r = curvepoint.bounds_of([curvepoint.pt(5.0, 5.0),
+                                  curvepoint.pt(3.0, 0.0 - 1.0),
+                                  curvepoint.pt(1.0, 2.0)])
+    test.assert(r.x == 1.0)
+    test.assert(r.y == 0.0 - 1.0)
+    test.assert(r.width == 4.0)
+    test.assert(r.height == 6.0)
+
+    test.case("an arc whose start angle is more than a turn below")
+    // `bounds` asks each of the ellipse's four extremal angles whether
+    // the sweep covers it, and an angle a turn or more below the start
+    // has to be wound up before it can be judged.
+    let a = curvearc.center_arc(curvepoint.pt(0.0, 0.0), 2.0, 1.0, 0.0,
+                                0.0 - 10.0, 4.0)
+    let box = curvearc.bounds(a)
+    var k = 0
+    while k <= 16
+        let p = curvearc.eval(a, k as Float / 16.0)
+        test.assert(p.x >= box.x - 1e-12)
+        test.assert(p.x <= box.x + box.width + 1e-12)
+        test.assert(p.y >= box.y - 1e-12)
+        test.assert(p.y <= box.y + box.height + 1e-12)
+        k = k + 1
+
+// The length search's own corners.  Its first guess is `length / total`
+// — the answer only for a curve walked at a constant speed — and the
+// Newton step from there can land outside `[0, 1]`, which is what the
+// two clamps in it are for.  Two cubics that are a straight line walked
+// at a speed that is NOT constant give it both overshoots and a closed
+// form to judge the answer by: x(t) = 2(1 - (1 - t)^3) is the ease-out
+// (all of the speed at the start and none at the end) and x(t) = 2t^3
+// is the ease-in, so each one's arc length from zero is its own x and
+// the parameter a length lands at is a cube root.
+@test
+fn test_the_length_search_survives_its_own_overshoots()
+    // Its first step is longer than the parameter it starts from, so
+    // Newton would take `t` below zero, outside the bracket, and the
+    // search bisects instead.
+    test.case("a fast start overshoots past zero and is still the cube root")
+    let ease_out = curvecubic.cubic(curvepoint.pt(0.0, 0.0),
+                                    curvepoint.pt(2.0, 0.0),
+                                    curvepoint.pt(2.0, 0.0),
+                                    curvepoint.pt(2.0, 0.0))
+    match curvecubic.t_for_length(ease_out, 1.2, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            // 1 - cbrt(1 - 1.2/2) = 1 - cbrt(0.4)
+            test.assert_approx(t, 1.0 - math.pow(0.4, 1.0 / 3.0), 1e-12)
+            let reached = curvecubic.eval(ease_out, t)
+            // The curve is that line and x is rising, so the length
+            // walked IS the x it has reached — no quadrature in the
+            // oracle at all.
+            test.assert_approx(reached.x, 1.2, 1e-12)
+            test.assert(reached.y == 0.0)
+
+    // The mirror image: the first step is longer than the domain that
+    // is left, and Newton would take `t` above one.
+    test.case("a slow start overshoots past one and is still the cube root")
+    let ease_in = curvecubic.cubic(curvepoint.pt(0.0, 0.0),
+                                   curvepoint.pt(0.0, 0.0),
+                                   curvepoint.pt(0.0, 0.0),
+                                   curvepoint.pt(2.0, 0.0))
+    match curvecubic.t_for_length(ease_in, 0.4, 1e-9)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            // cbrt(0.4/2) = cbrt(0.2)
+            test.assert_approx(t, math.pow(0.2, 1.0 / 3.0), 1e-12)
+            let reached = curvecubic.eval(ease_in, t)
+            test.assert_approx(reached.x, 0.4, 1e-12)
+
+    // A tolerance no double can meet: the search runs until its step or
+    // its bracket is zero, or its sixty-four turns are spent, and answers
+    // the last estimate.  The number it hands back is the cube root all
+    // the same — the counter is a ceiling on work, not on accuracy.
+    test.case("a tolerance below what a double holds runs the loop out and still answers")
+    match curvecubic.t_for_length(ease_in, 1.0, 1e-30)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            // cbrt(1.0/2)
+            test.assert_approx(t, math.pow(0.5, 1.0 / 3.0), 1e-12)
+            test.assert(t >= 0.0 and t <= 1.0)
+
+    // The initial guess for a length of exactly half the total is
+    // `(total/2) / total`, and on a cubic whose cusp sits at t = 0.5
+    // that guess IS the cusp, where the speed is zero and Newton's step
+    // would be a division by it.  The search bisects its bracket there
+    // instead, and answers the parameter that walks half the length:
+    // 0.7550688502046952, measured by bisecting the walked length of
+    // `subdivide(c, t).0`.
+    test.case("a guess that lands on a cusp still finds the parameter the length asks for")
+    let cusp = cusp_cubic()
+    match curvecubic.arc_length(cusp, 1e-12)
+        Err(e)    => test.fail(e.message())
+        Ok(total) =>
+            match curvecubic.t_for_length(cusp, total / 2.0, 1e-12)
+                Err(e) => test.fail(e.message())
+                Ok(t)  =>
+                    test.assert_approx(t, 0.7550688502046952, 1e-6)
+                    let (head, _) = curvecubic.subdivide(cusp, t)
+                    match curvecubic.arc_length(head, 1e-12)
+                        Err(e)   => test.fail(e.message())
+                        Ok(walk) => test.assert_approx(walk, total / 2.0, 1e-6)
+
+    test.case("and the length up to the cusp answers the cusp")
+    let (to_cusp, _) = curvecubic.subdivide(cusp, 0.5)
+    match curvecubic.arc_length(to_cusp, 1e-12)
+        Err(e)   => test.fail(e.message())
+        Ok(upto) =>
+            match curvecubic.t_for_length(cusp, upto, 1e-12)
+                Err(e) => test.fail(e.message())
+                Ok(t)  => test.assert_approx(t, 0.5, 1e-6)

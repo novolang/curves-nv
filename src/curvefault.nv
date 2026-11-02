@@ -73,10 +73,19 @@ pub enum CurveFault
 // CurveFault>` exist at all.
 impl Error for CurveFault
     // The one-line message, naming the number that was wrong.
-    //
-    // Panics with `not implemented` until the bodies land.
     fn message(self) -> Str
-        todo("curves-nv.CurveFault.message")
+        match self
+            CurveToleranceNotPositive(given)      => "curve tolerance must be positive, got ${given}"
+            CurveArcLengthOutOfRange(given, all)  => "arc length ${given} is outside 0 to ${all}"
+            CurveParameterOutOfRange(given)       => "curve parameter ${given} is outside 0.0 to 1.0"
+            CurveRangeInverted(t0, t1)            => "curve range ${t0} to ${t1} starts after it ends"
+            CurveKnotCountWrong(knots, expected)  => "knot vector holds ${knots} knots, not ${expected}"
+            CurveKnotsNotAscending(index)         => "knot vector falls at index ${index}"
+            CurveTooFewControlPoints(given, need) => "degree needs ${need} control points, got ${given}"
+            CurveDegreeOutOfRange(given)          => "spline degree ${given} is outside 1 to 7"
+            CurveRadiusNotPositive(rx, ry)        => "arc radii ${rx} and ${ry} must be positive"
+            CurveTooFewKnotPoints(given)          => "catmull-rom needs 4 points, got ${given}"
+            CurveFlattenLimitReached(seg, limit)  => "flattening reached ${seg} segments, the limit is ${limit}"
 
 // A short stable code for logs: `"tolerance_not_positive"`,
 // `"knot_count_wrong"`, and so on.
@@ -88,7 +97,18 @@ impl Error for CurveFault
 //     println(curvefault.code(CurveToleranceNotPositive(0.0)))
 // ```
 pub fn code(f: CurveFault) -> Str []
-    todo("curves-nv.curvefault.code")
+    match f
+        CurveToleranceNotPositive(_)   => "tolerance_not_positive"
+        CurveArcLengthOutOfRange(_, _) => "arc_length_out_of_range"
+        CurveParameterOutOfRange(_)    => "parameter_out_of_range"
+        CurveRangeInverted(_, _)       => "range_inverted"
+        CurveKnotCountWrong(_, _)      => "knot_count_wrong"
+        CurveKnotsNotAscending(_)      => "knots_not_ascending"
+        CurveTooFewControlPoints(_, _) => "too_few_control_points"
+        CurveDegreeOutOfRange(_)       => "degree_out_of_range"
+        CurveRadiusNotPositive(_, _)   => "radius_not_positive"
+        CurveTooFewKnotPoints(_)       => "too_few_knot_points"
+        CurveFlattenLimitReached(_, _) => "flatten_limit_reached"
 
 // Whether the refusal is about the caller's arguments rather than
 // about the curve.
@@ -105,4 +125,15 @@ pub fn code(f: CurveFault) -> Str []
 //     println("${curvefault.is_argument_fault(CurveKnotCountWrong(3, 7))}")        // false
 // ```
 pub fn is_argument_fault(f: CurveFault) -> Bool []
-    todo("curves-nv.curvefault.is_argument_fault")
+    match f
+        CurveToleranceNotPositive(_)   => true
+        CurveParameterOutOfRange(_)    => true
+        CurveRangeInverted(_, _)       => true
+        CurveArcLengthOutOfRange(_, _) => true
+        CurveKnotCountWrong(_, _)      => false
+        CurveKnotsNotAscending(_)      => false
+        CurveTooFewControlPoints(_, _) => false
+        CurveDegreeOutOfRange(_)       => false
+        CurveRadiusNotPositive(_, _)   => false
+        CurveTooFewKnotPoints(_)       => false
+        CurveFlattenLimitReached(_, _) => false

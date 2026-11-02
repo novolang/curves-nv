@@ -23,7 +23,159 @@
 
 use curvepoint
 use curvecubic
+use curvefault
 use geomxform
+
+// ── the closed forms a quadratic has and a cubic does not ───────────
+
+// The cube root, so that the cubic solver below does not take a power
+// of a negative base.
+fn cbrt(x: Float) -> Float
+    if x < 0.0
+        return 0.0 - math.pow(0.0 - x, 1.0 / 3.0)
+    math.pow(x, 1.0 / 3.0)
+
+// A root in `0.0 ..= 1.0`, once.  The tolerance is how near two roots
+// have to be before they are treated as one, which is the only thing
+// `nearest_point`'s tolerance parameter decides.
+fn push_root(var out: [Float], t: Float, tolerance: Float)
+    if t < 0.0 or t > 1.0
+        return
+    var i = 0
+    while i < list.len(out)
+        if math.abs(list.get(out, i) - t) <= tolerance
+            return
+        i = i + 1
+    list.push(out, t)
+
+// The real roots in `0.0 ..= 1.0` of `c2 t^2 + c1 t + c0`.
+//
+// Closed form, which is why `nearest_point` and `intersect_line` here
+// need no search: a quadratic's derivative conditions are one degree
+// below the cubic's.  A zero leading coefficient falls through to the
+// linear case rather than dividing by it, which is what makes a
+// straight quadratic answer exactly.
+fn quad_roots_in_unit(c2: Float, c1: Float, c0: Float, tolerance: Float) -> [Float]
+    var out: [Float] = []
+    if c2 == 0.0
+        if c1 == 0.0
+            return out
+        push_root(var out, (0.0 - c0) / c1, tolerance)
+        return out
+    let disc = c1 * c1 - 4.0 * c2 * c0
+    if disc < 0.0
+        return out
+    if disc == 0.0
+        push_root(var out, (0.0 - c1) / (2.0 * c2), tolerance)
+        return out
+    let s = math.sqrt(disc)
+    push_root(var out, (0.0 - c1 - s) / (2.0 * c2), tolerance)
+    push_root(var out, (0.0 - c1 + s) / (2.0 * c2), tolerance)
+    out
+
+// The real roots in `0.0 ..= 1.0` of `c3 t^3 + c2 t^2 + c1 t + c0`.
+//
+// WHAT `nearest_point` SOLVES: the condition for a nearest point on a
+// quadratic curve is a cubic in the parameter, one degree below the
+// quintic a cubic curve needs.  Every degenerate degree falls through
+// to the one below it, so a straight quadratic's root is a division.
+fn cubic_roots_in_unit(c3: Float, c2: Float, c1: Float, c0: Float, tolerance: Float) -> [Float]
+    var out: [Float] = []
+    if c3 == 0.0
+        return quad_roots_in_unit(c2, c1, c0, tolerance)
+    let a = c2 / c3
+    let b = c1 / c3
+    let c = c0 / c3
+    // Depressed: `x = t + a/3`, so `x^3 + p x + q`.
+    let p = b - a * a / 3.0
+    let q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + c
+    let shift = a / 3.0
+    let half = q / 2.0
+    let disc = half * half + p * p * p / 27.0
+    if disc > 0.0
+        // One real root, through Cardano.
+        let s = math.sqrt(disc)
+        push_root(var out, cbrt(0.0 - half + s) + cbrt(0.0 - half - s) - shift,
+                  tolerance)
+        return out
+    if p == 0.0
+        // No quadratic term either: a triple root at zero.
+        push_root(var out, 0.0 - shift, tolerance)
+        return out
+    // Three real roots, by the trigonometric form, which is the only
+    // way to write them when the discriminant is negative.
+    let m = 2.0 * math.sqrt(0.0 - p / 3.0)
+    let arg = math.clamp(3.0 * q / (p * m), 0.0 - 1.0, 1.0)
+    var k = 0
+    while k < 3
+        let angle = (math.acos(arg) - 2.0 * math.pi() * k as Float) / 3.0
+        push_root(var out, m * math.cos(angle) - shift, tolerance)
+        k = k + 1
+    out
+
+// The length of the curve from `0` to `t`, in closed form.
+//
+// The integrand `|q'(t)|` is the square root of a quadratic in `t`, so
+// it integrates to a polynomial part plus a logarithm — which is what
+// `arc_length` on a cubic cannot do and why this type exists.  Three
+// cases are separated by hand: a constant speed (the second difference
+// is zero), a straight curve (`A` and `B` parallel, where the logarithm
+// has no coefficient and its argument is a product that can be zero),
+// and the general one.
+fn arc_from_zero(q: CurveQuad, t: Float) -> Float
+    let a = curvepoint.between(q.p0, q.p1)
+    let b = curvepoint.vec(q.p2.x - 2.0 * q.p1.x + q.p0.x,
+                           q.p2.y - 2.0 * q.p1.y + q.p0.y)
+    let g = b.dx * b.dx + b.dy * b.dy
+    let f0 = curvepoint.length(a)
+    if g == 0.0
+        // The control point is the midpoint: the speed is constant.
+        return 2.0 * f0 * t
+    let beta = a.dx * b.dx + a.dy * b.dy
+    let f = curvepoint.length(curvepoint.vec(a.dx + b.dx * t, a.dy + b.dy * t))
+    var out = ((g * t + beta) * f - beta * f0) / g
+    let k2 = (a.dx * a.dx + a.dy * a.dy) * g - beta * beta
+    if k2 <= 0.0
+        // Parallel differences: the curve is straight and the
+        // logarithm's coefficient is zero.
+        return out
+    let s = math.sqrt(g)
+    let lo = s * f0 + beta
+    let hi = s * f + g * t + beta
+    if lo <= 0.0 or hi <= 0.0
+        return out
+    out = out + k2 / (g * s) * math.log(hi / lo)
+    out
+
+// Whether the quadratic is the straight, uniformly parameterised
+// segment between its endpoints: the control point at the midpoint.
+fn uniform_line(q: CurveQuad) -> Bool
+    let mid = curvepoint.lerp(q.p0, q.p2, 0.5)
+    mid.x == q.p1.x and mid.y == q.p1.y
+
+// The polar form of the quadratic at two parameters, which is what
+// makes `segment` an exact reparameterisation rather than a second
+// subdivision.
+fn blossom(q: CurveQuad, u1: Float, u2: Float) -> CurvePoint
+    let a = curvepoint.lerp(q.p0, q.p1, u1)
+    let b = curvepoint.lerp(q.p1, q.p2, u1)
+    curvepoint.lerp(a, b, u2)
+
+// The distance of a point from the line through two others, so that a
+// degenerate chord is not a division by zero.
+fn chord_distance(p: CurvePoint, a: CurvePoint, b: CurvePoint, d: Float) -> Float
+    if d == 0.0
+        return curvepoint.distance(p, a)
+    math.abs((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x)) / d
+
+// Whether the control point is within the tolerance of the chord,
+// which is the whole flatness bound for a quadratic: the curve deviates
+// from the chord by at most half the control point's deviation.
+fn flat_enough(q: CurveQuad, tolerance: Float) -> Bool
+    chord_distance(q.p1, q.p0, q.p2, curvepoint.distance(q.p0, q.p2)) <= tolerance
+
+// The most segments one flattening may produce, as in `curvecubic`.
+const QUAD_FLATTEN_LIMIT = 4096
 
 // A quadratic Bézier: a start, one control and an end.
 //
@@ -57,7 +209,7 @@ pub struct CurveQuad
 //     println("${curvequad.eval(q, 1.0).x}")    // 2
 // ```
 pub fn quad(p0: CurvePoint, p1: CurvePoint, p2: CurvePoint) -> CurveQuad []
-    todo("curves-nv.curvequad.quad")
+    CurveQuad { p0: p0, p1: p1, p2: p2 }
 
 // The point at a parameter.  Clamps, like the cubic's.
 //
@@ -71,7 +223,13 @@ pub fn quad(p0: CurvePoint, p1: CurvePoint, p2: CurvePoint) -> CurveQuad []
 //     println("${curvequad.eval(q, 0.5).x}")    // 1
 // ```
 pub fn eval(q: CurveQuad, t: Float) -> CurvePoint []
-    todo("curves-nv.curvequad.eval")
+    if t <= 0.0
+        return q.p0
+    if t >= 1.0
+        return q.p2
+    let a = curvepoint.lerp(q.p0, q.p1, t)
+    let b = curvepoint.lerp(q.p1, q.p2, t)
+    curvepoint.lerp(a, b, t)
 
 // The first derivative at a parameter.
 //
@@ -85,7 +243,14 @@ pub fn eval(q: CurveQuad, t: Float) -> CurvePoint []
 //     println("${curvequad.derivative(q, 0.5).dx}")   // 2
 // ```
 pub fn derivative(q: CurveQuad, t: Float) -> CurveVec []
-    todo("curves-nv.curvequad.derivative")
+    let a = curvepoint.between(q.p0, q.p1)
+    let b = curvepoint.between(q.p1, q.p2)
+    if t <= 0.0
+        return curvepoint.vec(2.0 * a.dx, 2.0 * a.dy)
+    if t >= 1.0
+        return curvepoint.vec(2.0 * b.dx, 2.0 * b.dy)
+    curvepoint.vec(2.0 * (a.dx + (b.dx - a.dx) * t),
+                   2.0 * (a.dy + (b.dy - a.dy) * t))
 
 // The second derivative, which is CONSTANT along a quadratic.
 //
@@ -103,7 +268,8 @@ pub fn derivative(q: CurveQuad, t: Float) -> CurveVec []
 //     println("${curvequad.second_derivative(q).dy}")   // -4
 // ```
 pub fn second_derivative(q: CurveQuad) -> CurveVec []
-    todo("curves-nv.curvequad.second_derivative")
+    curvepoint.vec(2.0 * (q.p0.x - 2.0 * q.p1.x + q.p2.x),
+                   2.0 * (q.p0.y - 2.0 * q.p1.y + q.p2.y))
 
 // The signed curvature at a parameter.
 //
@@ -117,7 +283,13 @@ pub fn second_derivative(q: CurveQuad) -> CurveVec []
 //     println("${curvequad.curvature(q, 0.5)}")   // 0
 // ```
 pub fn curvature(q: CurveQuad, t: Float) -> Float []
-    todo("curves-nv.curvequad.curvature")
+    let d1 = derivative(q, t)
+    let d2 = second_derivative(q)
+    let speed2 = d1.dx * d1.dx + d1.dy * d1.dy
+    // A cusp has no curvature to report, the same as for the cubic.
+    if speed2 == 0.0
+        return 0.0
+    (d1.dx * d2.dy - d1.dy * d2.dx) / math.pow(speed2, 1.5)
 
 // The unit tangent at a parameter, or `None` at a cusp.
 //
@@ -133,7 +305,7 @@ pub fn curvature(q: CurveQuad, t: Float) -> Float []
 //         None    => println("a cusp")
 // ```
 pub fn unit_tangent(q: CurveQuad, t: Float) -> ?CurveVec []
-    todo("curves-nv.curvequad.unit_tangent")
+    curvepoint.normalize(derivative(q, t))
 
 // The curve split at a parameter, by de Casteljau.
 //
@@ -147,7 +319,11 @@ pub fn unit_tangent(q: CurveQuad, t: Float) -> ?CurveVec []
 //     println("${curvequad.eval(curvequad.subdivide(q, 0.5).0, 1.0).x}")   // 1
 // ```
 pub fn subdivide(q: CurveQuad, t: Float) -> (CurveQuad, CurveQuad) []
-    todo("curves-nv.curvequad.subdivide")
+    let a = curvepoint.lerp(q.p0, q.p1, t)
+    let b = curvepoint.lerp(q.p1, q.p2, t)
+    let mid = curvepoint.lerp(a, b, t)
+    (CurveQuad { p0: q.p0, p1: a, p2: mid },
+     CurveQuad { p0: mid, p1: b, p2: q.p2 })
 
 // The piece between two parameters, reparameterised to `0 ..= 1`.
 //
@@ -163,7 +339,14 @@ pub fn subdivide(q: CurveQuad, t: Float) -> (CurveQuad, CurveQuad) []
 //         Err(e) => println(e.message())
 // ```
 pub fn segment(q: CurveQuad, t0: Float, t1: Float) -> Result<CurveQuad, CurveFault> []
-    todo("curves-nv.curvequad.segment")
+    if t0 >= t1
+        return Err(CurveRangeInverted(t0, t1))
+    // As for the cubic: the piece's control point is the polar form at
+    // the two parameters, so the piece passes through the curve's own
+    // points at them and its ends are exact.
+    Ok(CurveQuad { p0: eval(q, t0),
+                   p1: blossom(q, t0, t1),
+                   p2: eval(q, t1) })
 
 // The curve with its direction reversed.
 //
@@ -177,7 +360,7 @@ pub fn segment(q: CurveQuad, t0: Float, t1: Float) -> Result<CurveQuad, CurveFau
 //     println("${curvequad.eval(curvequad.reverse(q), 0.0).x}")   // 2
 // ```
 pub fn reverse(q: CurveQuad) -> CurveQuad []
-    todo("curves-nv.curvequad.reverse")
+    CurveQuad { p0: q.p2, p1: q.p1, p2: q.p0 }
 
 // The curve under an affine transform, exactly.
 //
@@ -192,7 +375,9 @@ pub fn reverse(q: CurveQuad) -> CurveQuad []
 //     println("${curvequad.eval(curvequad.transform(q, geomxform.translation(1.0, 0.0)), 0.0).x}")
 // ```
 pub fn transform(q: CurveQuad, t: GeomXform) -> CurveQuad []
-    todo("curves-nv.curvequad.transform")
+    CurveQuad { p0: curvepoint.of_geom(geomxform.apply_point(t, curvepoint.to_geom(q.p0))),
+                p1: curvepoint.of_geom(geomxform.apply_point(t, curvepoint.to_geom(q.p1))),
+                p2: curvepoint.of_geom(geomxform.apply_point(t, curvepoint.to_geom(q.p2))) }
 
 // The length of the curve.  EXACT, and no tolerance.
 //
@@ -212,12 +397,13 @@ pub fn transform(q: CurveQuad, t: GeomXform) -> CurveQuad []
 //     println("${curvequad.arc_length(q)}")     // 2
 // ```
 pub fn arc_length(q: CurveQuad) -> Float []
-    todo("curves-nv.curvequad.arc_length")
+    arc_from_zero(q, 1.0)
 
 // The parameter at which the curve has covered a given length.
 //
-// Newton iteration over the closed form, so the tolerance is the
-// caller's stopping rule and not an integration error.
+// Newton iteration over the closed form, bisecting where Newton has no
+// step (a turning point), so the tolerance is the caller's stopping
+// rule and not an integration error.
 //
 // ```novo
 // use curvequad
@@ -231,7 +417,59 @@ pub fn arc_length(q: CurveQuad) -> Float []
 //         Err(e) => println(e.message())
 // ```
 pub fn t_for_length(q: CurveQuad, length: Float, tolerance: Float) -> Result<Float, CurveFault> []
-    todo("curves-nv.curvequad.t_for_length")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    let total = arc_length(q)
+    if length < 0.0 or length > total
+        return Err(CurveArcLengthOutOfRange(length, total))
+    // A straight, uniformly parameterised quadratic covers equal
+    // lengths in equal parameter steps, so the answer is a ratio
+    // rather than a root: `t_for_length(straight, 1.0, 1e-9)` is
+    // exactly 0.25.
+    if uniform_line(q)
+        if total == 0.0
+            return Ok(0.0)
+        return Ok(length / total)
+    // Newton on `S(t) - length`, whose derivative is the speed, kept
+    // inside a bracket `[lo, hi]` that holds the answer.  The closed form
+    // makes `S` cheap enough that the tolerance is only the stopping
+    // rule.
+    //
+    // A TURNING POINT HAS NO NEWTON STEP: a quadratic that doubles back
+    // on its line has zero speed there.  `S` is monotone all the same, so
+    // where the step does not exist, or would leave the bracket, the
+    // search bisects the bracket instead.
+    var t = 0.0
+    if total > 0.0
+        t = length / total
+    var lo = 0.0
+    var hi = 1.0
+    var i = 0
+    var done = false
+    while not done
+        let have = arc_from_zero(q, t)
+        // The closed form can hit the length exactly, and then `t` is
+        // the answer whatever the speed there is.
+        if have == length
+            return Ok(t)
+        if have < length
+            lo = t
+        else
+            hi = t
+        let speed = curvepoint.length(derivative(q, t))
+        var next = (lo + hi) * 0.5
+        if speed > 0.0
+            let newton = t - (have - length) / speed
+            if newton > lo and newton < hi
+                next = newton
+        let step = next - t
+        t = next
+        i = i + 1
+        // Sixty-four turns bound the work.  A bisection turn halves the
+        // bracket, and sixty-four halvings of `[0, 1]` are narrower than
+        // the gap between two doubles near any answer.
+        done = math.abs(step) <= tolerance or hi - lo <= tolerance or i >= 64
+    Ok(t)
 
 // The curve as a polyline within a tolerance of it.
 //
@@ -248,7 +486,27 @@ pub fn t_for_length(q: CurveQuad, length: Float, tolerance: Float) -> Result<Flo
 //         Err(e)  => println(e.message())
 // ```
 pub fn flatten(q: CurveQuad, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
-    todo("curves-nv.curvequad.flatten")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    var out: [CurvePoint] = [q.p0]
+    var pending: [CurveQuad] = [q]
+    var segments = 0
+    while list.len(pending) > 0
+        if segments + list.len(pending) > QUAD_FLATTEN_LIMIT
+            return Err(CurveFlattenLimitReached(segments + list.len(pending),
+                                                QUAD_FLATTEN_LIMIT))
+        let last = list.len(pending) - 1
+        let piece = list.get(pending, last)
+        pending = list.slice(pending, 0, last)
+        if flat_enough(piece, tolerance)
+            list.push(out, piece.p2)
+            segments = segments + 1
+        else
+            // Pushed right first so the left piece is the one taken.
+            let halves = subdivide(piece, 0.5)
+            list.push(pending, halves.1)
+            list.push(pending, halves.0)
+    Ok(out)
 
 // The point on the curve nearest a given point.
 //
@@ -270,7 +528,35 @@ pub fn flatten(q: CurveQuad, tolerance: Float) -> Result<[CurvePoint], CurveFaul
 // ```
 pub fn nearest_point(q: CurveQuad, to: CurvePoint,
                      tolerance: Float) -> Result<CurveProjection, CurveFault> []
-    todo("curves-nv.curvequad.nearest_point")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    // The condition `(q(t) - to) . q'(t) = 0`, which is a cubic in the
+    // parameter rather than the quintic a cubic curve needs.
+    let d = curvepoint.between(to, q.p0)
+    let a = curvepoint.between(q.p0, q.p1)
+    let c = curvepoint.vec(q.p0.x - 2.0 * q.p1.x + q.p2.x,
+                           q.p0.y - 2.0 * q.p1.y + q.p2.y)
+    let c3 = c.dx * c.dx + c.dy * c.dy
+    let c2 = 3.0 * (a.dx * c.dx + a.dy * c.dy)
+    let c1 = d.dx * c.dx + d.dy * c.dy + 2.0 * (a.dx * a.dx + a.dy * a.dy)
+    let c0 = d.dx * a.dx + d.dy * a.dy
+    let roots = cubic_roots_in_unit(c3, c2, c1, c0, tolerance)
+    // The two ends are candidates a root never is.
+    var best_t = 0.0
+    var best_d = curvepoint.distance(q.p0, to)
+    let end_d = curvepoint.distance(q.p2, to)
+    if end_d < best_d
+        best_t = 1.0
+        best_d = end_d
+    for i in 0..list.len(roots)
+        let t = list.get(roots, i)
+        let p = eval(q, t)
+        let dist = curvepoint.distance(p, to)
+        if dist < best_d
+            best_t = t
+            best_d = dist
+    let p = eval(q, best_t)
+    Ok(CurveProjection { t: best_t, point: p, distance: curvepoint.distance(p, to) })
 
 // The smallest rectangle containing the curve.  Exact: the derivative
 // is linear, so its root is a division.
@@ -285,7 +571,26 @@ pub fn nearest_point(q: CurveQuad, to: CurvePoint,
 //     println("${curvequad.bounds(q).height}")   // 1, not 2
 // ```
 pub fn bounds(q: CurveQuad) -> CurveRect []
-    todo("curves-nv.curvequad.bounds")
+    // The derivative is linear per component, so each extremum is one
+    // division and there is nothing to search.
+    var minx = math.min(q.p0.x, q.p2.x)
+    var maxx = math.max(q.p0.x, q.p2.x)
+    var miny = math.min(q.p0.y, q.p2.y)
+    var maxy = math.max(q.p0.y, q.p2.y)
+    let bx = q.p2.x - 2.0 * q.p1.x + q.p0.x
+    let by = q.p2.y - 2.0 * q.p1.y + q.p0.y
+    var ts: [Float] = []
+    if bx != 0.0
+        push_root(var ts, 0.0 - (q.p1.x - q.p0.x) / bx, 0.0)
+    if by != 0.0
+        push_root(var ts, 0.0 - (q.p1.y - q.p0.y) / by, 0.0)
+    for i in 0..list.len(ts)
+        let p = eval(q, list.get(ts, i))
+        minx = math.min(minx, p.x)
+        maxx = math.max(maxx, p.x)
+        miny = math.min(miny, p.y)
+        maxy = math.max(maxy, p.y)
+    curvepoint.rect(minx, miny, maxx - minx, maxy - miny)
 
 // The bounding box of the three control points.
 //
@@ -299,7 +604,7 @@ pub fn bounds(q: CurveQuad) -> CurveRect []
 //     println("${curvequad.hull_bounds(q).height}")   // 2
 // ```
 pub fn hull_bounds(q: CurveQuad) -> CurveRect []
-    todo("curves-nv.curvequad.hull_bounds")
+    curvepoint.bounds_of([q.p0, q.p1, q.p2])
 
 // Where the curve crosses an infinite line through two points.  At
 // most two crossings.
@@ -316,7 +621,27 @@ pub fn hull_bounds(q: CurveQuad) -> CurveRect []
 //                                                  curvepoint.pt(1.0, 0.0)))}")
 // ```
 pub fn intersect_line(q: CurveQuad, a: CurvePoint, b: CurvePoint) -> [CurveHit] []
-    todo("curves-nv.curvequad.intersect_line")
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    var out: [CurveHit] = []
+    // A line that comes back to its own start has no direction.
+    if dx == 0.0 and dy == 0.0
+        return out
+    // `cross(q(t) - a, d)`, a quadratic in the parameter.
+    let ca = curvepoint.between(q.p0, q.p1)
+    let cc = curvepoint.vec(q.p0.x - 2.0 * q.p1.x + q.p2.x,
+                            q.p0.y - 2.0 * q.p1.y + q.p2.y)
+    let k0 = (q.p0.x - a.x) * dy - (q.p0.y - a.y) * dx
+    let k1 = 2.0 * (ca.dx * dy - ca.dy * dx)
+    let k2 = cc.dx * dy - cc.dy * dx
+    let roots = quad_roots_in_unit(k2, k1, k0, 1e-9)
+    let den = dx * dx + dy * dy
+    for i in 0..list.len(roots)
+        let t = list.get(roots, i)
+        let p = eval(q, t)
+        list.push(out, CurveHit { t: t, point: p,
+                                  line_t: ((p.x - a.x) * dx + (p.y - a.y) * dy) / den })
+    out
 
 // The same curve as a cubic.  EXACT.
 //
@@ -336,7 +661,12 @@ pub fn intersect_line(q: CurveQuad, a: CurvePoint, b: CurvePoint) -> [CurveHit] 
 //     println("${curvecubic.eval(curvequad.to_cubic(q), 0.5).y}")   // 0.5
 // ```
 pub fn to_cubic(q: CurveQuad) -> CurveCubic []
-    todo("curves-nv.curvequad.to_cubic")
+    // Degree elevation: the cubic's controls are the quadratic's ends
+    // with the control point weighted two thirds towards each.
+    curvecubic.cubic(q.p0,
+                     curvepoint.lerp(q.p0, q.p1, 2.0 / 3.0),
+                     curvepoint.lerp(q.p2, q.p1, 2.0 / 3.0),
+                     q.p2)
 
 // A cubic's nearest quadratic, and how far apart they are.
 //
@@ -357,4 +687,20 @@ pub fn to_cubic(q: CurveQuad) -> CurveCubic []
 //     println("${curvequad.of_cubic(c).1}")     // 0 — a line is exactly a quadratic
 // ```
 pub fn of_cubic(c: CurveCubic) -> (CurveQuad, Float) []
-    todo("curves-nv.curvequad.of_cubic")
+    // Dropping the cubic term of the power basis: the quadratic that
+    // agrees with the cubic in its value and first two derivatives at
+    // the start, written back in Bézier controls.
+    let q0 = c.p0
+    let q1 = curvepoint.pt((3.0 * c.p1.x - c.p0.x) / 2.0, (3.0 * c.p1.y - c.p0.y) / 2.0)
+    let q2 = curvepoint.pt(c.p0.x - 3.0 * c.p1.x + 3.0 * c.p2.x,
+                           c.p0.y - 3.0 * c.p1.y + 3.0 * c.p2.y)
+    // The error is the largest control point distance between the cubic
+    // and that quadratic raised back to a cubic — a bound rather than a
+    // sample, and exactly zero when the cubic already was one.
+    let r1 = curvepoint.lerp(q0, q1, 2.0 / 3.0)
+    let r2 = curvepoint.lerp(q1, q2, 1.0 / 3.0)
+    var err = curvepoint.distance(c.p0, q0)
+    err = math.max(err, curvepoint.distance(c.p1, r1))
+    err = math.max(err, curvepoint.distance(c.p2, r2))
+    err = math.max(err, curvepoint.distance(c.p3, q2))
+    (CurveQuad { p0: q0, p1: q1, p2: q2 }, err)

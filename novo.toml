@@ -1,15 +1,10 @@
 [package]
 name        = "curves-nv"
-version     = "0.0.2"
-description = "Planar curves as values: quadratic and cubic Béziers, elliptical arcs, B-splines and Catmull-Rom splines, with evaluation, derivatives, curvature, arc length and its inverse, subdivision, flattening to a named tolerance, nearest point, exact and hull bounds, and intersection with a line.  Every tolerance is an argument.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "Planar curves as values: quadratic and cubic Béziers, elliptical arcs, B-splines and Catmull-Rom splines, with evaluation, derivatives, curvature, arc length and its inverse, subdivision, flattening to a named tolerance, nearest point, exact and hull bounds, and intersection with a line.  Every tolerance is an argument."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `core`.  A curve is four points and the operations on it are
 # arithmetic: de Casteljau subdivision, a derivative that is a curve of
@@ -22,7 +17,7 @@ category    = "graphics"
 tags        = ["bezier", "curve", "spline", "bspline", "catmull-rom", "arc", "flatten", "arc-length", "kurbo", "geometry"]
 repository  = "https://github.com/novolang/curves-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.9.0"
+novo        = ">= 0.20.2"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

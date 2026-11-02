@@ -32,7 +32,132 @@
 // because a point on an arc IS a closed form.
 
 use curvepoint
+use curvecubic
+use curvefault
 use geomxform
+
+// ── the arithmetic both parameterisations are built on ──────────────
+
+// The point at an angle, before the sweep is considered, in the
+// ellipse's own untilted frame.  One place, so that `eval`,
+// `point_at_angle` and the bounds all agree to the last bit.
+fn at_angle(a: CurveArcCenter, radians: Float) -> CurvePoint
+    let c = math.cos(radians)
+    let s = math.sin(radians)
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    curvepoint.pt(a.center.x + cr * a.rx * c - sr * a.ry * s,
+                  a.center.y + sr * a.rx * c + cr * a.ry * s)
+
+// The speed of the parameterisation at a parameter, which is also the
+// integrand `arc_length` integrates.
+fn speed_at(a: CurveArcCenter, t: Float) -> Float
+    let ang = a.start_angle + a.sweep_angle * t
+    let dx = (0.0 - a.rx) * math.sin(ang)
+    let dy = a.ry * math.cos(ang)
+    math.sqrt(dx * dx + dy * dy) * math.abs(a.sweep_angle)
+
+// The 5-point Gauss-Legendre estimate of the length over `[lo, hi]` in
+// the parameter.
+fn arc_gauss5(a: CurveArcCenter, lo: Float, hi: Float) -> Float
+    let half = (hi - lo) * 0.5
+    let mid = (lo + hi) * 0.5
+    let nodes = [0.5384693101056831, 0.9061798459386640,
+                 0.0 - 0.5384693101056831, 0.0 - 0.9061798459386640]
+    let weights = [0.4786286704993665, 0.2369268850561891,
+                   0.4786286704993665, 0.2369268850561891]
+    var sum = 0.0
+    for i in 0..4
+        sum = sum + list.get(weights, i) * speed_at(a, mid + half * list.get(nodes, i))
+    half * (0.5688888888888889 * speed_at(a, mid) + sum)
+
+// The length over `[lo, hi]`, refined until two halves agree.
+fn arc_rec(a: CurveArcCenter, lo: Float, hi: Float, whole: Float, tolerance: Float,
+           depth: Int) -> Float
+    let mid = (lo + hi) * 0.5
+    let left = arc_gauss5(a, lo, mid)
+    let right = arc_gauss5(a, mid, hi)
+    if math.abs(left + right - whole) <= tolerance or depth >= 20
+        return left + right
+    arc_rec(a, lo, mid, left, tolerance * 0.5, depth + 1)
+        + arc_rec(a, mid, hi, right, tolerance * 0.5, depth + 1)
+
+// Whether an angle falls inside the swept range, counted as a
+// direction rather than an interval so that a sweep past a full turn
+// still contains everything.
+fn angle_covered(a: CurveArcCenter, radians: Float) -> Bool
+    if math.abs(a.sweep_angle) >= 2.0 * math.pi()
+        return true
+    let rel = radians - a.start_angle
+    let turn = 2.0 * math.pi()
+    var span = rel
+    if a.sweep_angle > 0.0
+        while span < 0.0
+            span = span + turn
+        while span > turn
+            span = span - turn
+        return span <= a.sweep_angle
+    while span > 0.0
+        span = span - turn
+    while span < 0.0 - turn
+        span = span + turn
+    span >= a.sweep_angle
+
+// The most points one flattening may produce, as in `curvecubic`.
+const ARC_FLATTEN_LIMIT = 4096
+
+// How far a point of a cubic piece sits from the ellipse, measured
+// along the radius through it.
+//
+// The standard construction matches the arc's tangent at both ends of
+// the piece, so the two curves stay parallel and the distance between
+// them is the difference of their radii in the same direction — which
+// is exactly this, and needs no search.
+fn radial_gap(a: CurveArcCenter, piece: CurveCubic, u: Float, cr: Float, sr: Float) -> Float
+    if a.rx == 0.0 or a.ry == 0.0
+        return 0.0
+    let q = curvecubic.eval(piece, u)
+    let dx = q.x - a.center.x
+    let dy = q.y - a.center.y
+    // The same direction, read in the ellipse's untitled frame.
+    let ex = cr * dx + sr * dy
+    let ey = (0.0 - sr) * dx + cr * dy
+    let angle = math.atan2(ey / a.ry, ex / a.rx)
+    let onx = cr * a.rx * math.cos(angle) - sr * a.ry * math.sin(angle)
+    let ony = sr * a.rx * math.cos(angle) + cr * a.ry * math.sin(angle)
+    math.hypot(dx - onx, dy - ony)
+
+// The standard cubic approximation of one piece of the arc, from
+// `angle0` sweeping by `delta` radians.
+//
+// The construction every renderer uses: the cubic through both ends,
+// whose interior controls sit on the tangents at the distance
+// `(4/3) tan(delta/4)` along them.  It matches the arc in position,
+// tangent and curvature at both ends, so the error is sixth order in
+// the angle.
+fn piece_cubic(a: CurveArcCenter, angle0: Float, delta: Float) -> CurveCubic
+    let k = 4.0 / 3.0 * math.tan(delta / 4.0)
+    let p0 = at_angle(a, angle0)
+    let p3 = at_angle(a, angle0 + delta)
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    let c0 = math.cos(angle0)
+    let s0 = math.sin(angle0)
+    let c1 = math.cos(angle0 + delta)
+    let s1 = math.sin(angle0 + delta)
+    // The tangent at an angle, in the untilted frame and then rotated.
+    let t0x = (0.0 - a.rx) * s0
+    let t0y = a.ry * c0
+    let t1x = (0.0 - a.rx) * s1
+    let t1y = a.ry * c1
+    let d0x = cr * t0x - sr * t0y
+    let d0y = sr * t0x + cr * t0y
+    let d1x = cr * t1x - sr * t1y
+    let d1y = sr * t1x + cr * t1y
+    curvecubic.cubic(p0,
+                     curvepoint.pt(p0.x + k * d0x, p0.y + k * d0y),
+                     curvepoint.pt(p3.x - k * d1x, p3.y - k * d1y),
+                     p3)
 
 // An arc as SVG's path syntax describes it: where it ends.
 //
@@ -106,7 +231,8 @@ pub struct CurveArcCenter
 // ```
 pub fn endpoint_arc(from: CurvePoint, rx: Float, ry: Float, rotation: Float, large_arc: Bool,
                     sweep: Bool, to: CurvePoint) -> CurveArcEndpoint []
-    todo("curves-nv.curvearc.endpoint_arc")
+    CurveArcEndpoint { from: from, rx: rx, ry: ry, rotation: rotation,
+                       large_arc: large_arc, sweep: sweep, to: to }
 
 // An arc in the centre parameterisation.
 //
@@ -120,7 +246,8 @@ pub fn endpoint_arc(from: CurvePoint, rx: Float, ry: Float, rotation: Float, lar
 // ```
 pub fn center_arc(center: CurvePoint, rx: Float, ry: Float, rotation: Float, start_angle: Float,
                   sweep_angle: Float) -> CurveArcCenter []
-    todo("curves-nv.curvearc.center_arc")
+    CurveArcCenter { center: center, rx: rx, ry: ry, rotation: rotation,
+                     start_angle: start_angle, sweep_angle: sweep_angle }
 
 // A whole ellipse as one arc: a full turn from angle zero.
 //
@@ -133,7 +260,7 @@ pub fn center_arc(center: CurvePoint, rx: Float, ry: Float, rotation: Float, sta
 //     println("${curvearc.is_full_turn(e)}")    // true
 // ```
 pub fn ellipse(center: CurvePoint, rx: Float, ry: Float, rotation: Float) -> CurveArcCenter []
-    todo("curves-nv.curvearc.ellipse")
+    center_arc(center, rx, ry, rotation, 0.0, 2.0 * math.pi())
 
 // A circular arc: an ellipse whose radii are equal and whose tilt is
 // therefore irrelevant.
@@ -148,9 +275,9 @@ pub fn ellipse(center: CurvePoint, rx: Float, ry: Float, rotation: Float) -> Cur
 // ```
 pub fn circular(center: CurvePoint, radius: Float, start_angle: Float,
                 sweep_angle: Float) -> CurveArcCenter []
-    todo("curves-nv.curvearc.circular")
+    center_arc(center, radius, radius, 0.0, start_angle, sweep_angle)
 
-// The endpoint arc as a centre arc: SVG Appendix B.2.2.
+// The endpoint arc as a centre arc: SVG Appendix B.2.4.
 //
 // THE CONVERSION EVERYBODY GETS WRONG ONCE.  Two things happen in it
 // that are not obvious from the formula: radii too small to reach
@@ -177,9 +304,59 @@ pub fn circular(center: CurvePoint, radius: Float, start_angle: Float,
 //         Err(e) => println(e.message())
 // ```
 pub fn to_center(a: CurveArcEndpoint) -> Result<CurveArcCenter, CurveFault> []
-    todo("curves-nv.curvearc.to_center")
+    if a.rx <= 0.0 or a.ry <= 0.0
+        return Err(CurveRadiusNotPositive(a.rx, a.ry))
+    let cosp = math.cos(a.rotation)
+    let sinp = math.sin(a.rotation)
+    let dx = (a.from.x - a.to.x) / 2.0
+    let dy = (a.from.y - a.to.y) / 2.0
+    let x1 = cosp * dx + sinp * dy
+    let y1 = (0.0 - sinp) * dx + cosp * dy
+    var rx = a.rx
+    var ry = a.ry
+    // Radii that cannot reach are scaled up together by the one
+    // factor that makes them just reach.
+    let lam = x1 * x1 / (rx * rx) + y1 * y1 / (ry * ry)
+    if lam > 1.0
+        let scale = math.sqrt(lam)
+        rx = rx * scale
+        ry = ry * scale
+    // The centre lies where the two radius circles through the
+    // endpoints meet; `den` is zero only when the endpoints coincide,
+    // where the arc is empty and the centre is the midpoint.
+    let den = rx * rx * y1 * y1 + ry * ry * x1 * x1
+    var sq = 0.0
+    if den > 0.0
+        let num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1
+        if num > 0.0
+            sq = num / den
+    // The two flags choose among the four arcs, and the pair that
+    // agrees picks the other side of the chord.
+    var sign = 1.0
+    if a.large_arc == a.sweep
+        sign = 0.0 - 1.0
+    let root = sign * math.sqrt(sq)
+    let cxp = root * (rx * y1 / ry)
+    let cyp = root * ((0.0 - ry) * x1 / rx)
+    let cx = cosp * cxp - sinp * cyp + (a.from.x + a.to.x) / 2.0
+    let cy = sinp * cxp + cosp * cyp + (a.from.y + a.to.y) / 2.0
+    let ux = (x1 - cxp) / rx
+    let uy = (y1 - cyp) / ry
+    let vx = (0.0 - x1 - cxp) / rx
+    let vy = (0.0 - y1 - cyp) / ry
+    let start_angle = math.atan2(uy, ux)
+    var sweep_angle = math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+    // `atan2` answers the short way round, so the long way has to be
+    // asked for by name.
+    let turn = 2.0 * math.pi()
+    if not a.sweep and sweep_angle > 0.0
+        sweep_angle = sweep_angle - turn
+    elif a.sweep and sweep_angle < 0.0
+        sweep_angle = sweep_angle + turn
+    Ok(center_arc(curvepoint.pt(cx, cy), rx, ry, a.rotation, start_angle,
+                  sweep_angle))
 
-// The centre arc as an endpoint arc: SVG Appendix B.2.1.
+// The centre arc as an endpoint arc: SVG Appendix B.2.3.
 //
 // The direction that loses nothing, and the one a path writer uses.
 //
@@ -192,7 +369,10 @@ pub fn to_center(a: CurveArcEndpoint) -> Result<CurveArcCenter, CurveFault> []
 //     println("${curvearc.to_endpoint(c).sweep}")   // true
 // ```
 pub fn to_endpoint(a: CurveArcCenter) -> CurveArcEndpoint []
-    todo("curves-nv.curvearc.to_endpoint")
+    CurveArcEndpoint { from: eval(a, 0.0), rx: a.rx, ry: a.ry,
+                       rotation: a.rotation,
+                       large_arc: math.abs(a.sweep_angle) > math.pi(),
+                       sweep: a.sweep_angle > 0.0, to: eval(a, 1.0) }
 
 // Whether the arc sweeps a full turn or more.
 //
@@ -208,7 +388,7 @@ pub fn to_endpoint(a: CurveArcCenter) -> CurveArcEndpoint []
 //     println("${curvearc.is_full_turn(curvearc.circular(curvepoint.pt(0.0, 0.0), 1.0, 0.0, 1.0))}")
 // ```
 pub fn is_full_turn(a: CurveArcCenter) -> Bool []
-    todo("curves-nv.curvearc.is_full_turn")
+    math.abs(a.sweep_angle) >= 2.0 * math.pi()
 
 // The point at a parameter, `0.0` at the start and `1.0` at the end.
 //
@@ -226,7 +406,7 @@ pub fn is_full_turn(a: CurveArcCenter) -> Bool []
 //     println("${curvearc.eval(a, 0.0).x}")     // 1
 // ```
 pub fn eval(a: CurveArcCenter, t: Float) -> CurvePoint []
-    todo("curves-nv.curvearc.eval")
+    point_at_angle(a, a.start_angle + a.sweep_angle * t)
 
 // The derivative at a parameter, as a vector.
 //
@@ -239,7 +419,15 @@ pub fn eval(a: CurveArcCenter, t: Float) -> CurvePoint []
 //     println("${curvearc.derivative(a, 0.0).dx}")   // 0
 // ```
 pub fn derivative(a: CurveArcCenter, t: Float) -> CurveVec []
-    todo("curves-nv.curvearc.derivative")
+    let ang = a.start_angle + a.sweep_angle * t
+    // The angle runs `sweep_angle` times as fast as the parameter, so
+    // the radius vector's own derivative is scaled by it.
+    let dx = 0.0 - a.rx * math.sin(ang)
+    let dy = a.ry * math.cos(ang)
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    curvepoint.vec((cr * dx - sr * dy) * a.sweep_angle,
+                   (sr * dx + cr * dy) * a.sweep_angle)
 
 // The point at an angle on the ellipse, before the sweep is
 // considered.
@@ -256,7 +444,7 @@ pub fn derivative(a: CurveArcCenter, t: Float) -> CurveVec []
 //     println("${curvearc.point_at_angle(e, 0.0).x}")   // 2
 // ```
 pub fn point_at_angle(a: CurveArcCenter, radians: Float) -> CurvePoint []
-    todo("curves-nv.curvearc.point_at_angle")
+    at_angle(a, radians)
 
 // The length of the arc, to a tolerance.
 //
@@ -277,7 +465,14 @@ pub fn point_at_angle(a: CurveArcCenter, radians: Float) -> CurvePoint []
 //         Err(e) => println(e.message())
 // ```
 pub fn arc_length(a: CurveArcCenter, tolerance: Float) -> Result<Float, CurveFault> []
-    todo("curves-nv.curvearc.arc_length")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    // A circle is the one elliptical arc with a closed form, and it is
+    // worth answering exactly rather than to a tolerance.
+    if a.rx == a.ry
+        return Ok(math.abs(a.sweep_angle) * a.rx)
+    let whole = arc_gauss5(a, 0.0, 1.0)
+    Ok(arc_rec(a, 0.0, 1.0, whole, tolerance, 0))
 
 // The arc split at a parameter.
 //
@@ -293,7 +488,9 @@ pub fn arc_length(a: CurveArcCenter, tolerance: Float) -> Result<Float, CurveFau
 //     println("${curvearc.subdivide(a, 0.5).0.sweep_angle < 2.0}")   // true
 // ```
 pub fn subdivide(a: CurveArcCenter, t: Float) -> (CurveArcCenter, CurveArcCenter) []
-    todo("curves-nv.curvearc.subdivide")
+    let angle = a.start_angle + a.sweep_angle * t
+    (center_arc(a.center, a.rx, a.ry, a.rotation, a.start_angle, a.sweep_angle * t),
+     center_arc(a.center, a.rx, a.ry, a.rotation, angle, a.sweep_angle * (1.0 - t)))
 
 // The arc as a polyline within a tolerance of it.
 //
@@ -313,7 +510,27 @@ pub fn subdivide(a: CurveArcCenter, t: Float) -> (CurveArcCenter, CurveArcCenter
 //         Err(e)  => println(e.message())
 // ```
 pub fn flatten(a: CurveArcCenter, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
-    todo("curves-nv.curvearc.flatten")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    // The step that keeps a chord's sagitta inside the tolerance.  A
+    // chord spanning `step` radians of an ellipse rises at most
+    // `radius * (1 - cos(step / 2))` away from it, which inverts to
+    // this step.
+    let radius = math.max(a.rx, a.ry)
+    var step = 2.0 * math.pi()
+    if radius > 0.0 and tolerance < 2.0 * radius
+        step = 2.0 * math.acos(1.0 - tolerance / radius)
+    var n = 1
+    while n as Float * step < math.abs(a.sweep_angle)
+        if n >= ARC_FLATTEN_LIMIT
+            return Err(CurveFlattenLimitReached(n + 1, ARC_FLATTEN_LIMIT))
+        n = n + 1
+    var out: [CurvePoint] = []
+    var i = 0
+    while i <= n
+        list.push(out, eval(a, i as Float / n as Float))
+        i = i + 1
+    Ok(out)
 
 // The arc as cubic Béziers.
 //
@@ -336,7 +553,20 @@ pub fn flatten(a: CurveArcCenter, tolerance: Float) -> Result<[CurvePoint], Curv
 //     println("${list.len(curvearc.to_cubics(a))}")   // 2 — half a turn is two pieces
 // ```
 pub fn to_cubics(a: CurveArcCenter) -> [CurveCubic] []
-    todo("curves-nv.curvearc.to_cubics")
+    // Pieces of at most a right angle, which is where the standard
+    // construction's error stops being small.
+    let quarter = math.pi() / 2.0
+    let sweep_abs = math.abs(a.sweep_angle)
+    var count = 1
+    while count as Float * quarter < sweep_abs - 1e-6
+        count = count + 1
+    let delta = a.sweep_angle / count as Float
+    var out: [CurveCubic] = []
+    var i = 0
+    while i < count
+        list.push(out, piece_cubic(a, a.start_angle + delta * i as Float, delta))
+        i = i + 1
+    out
 
 // The greatest distance between the arc and the cubics `to_cubics`
 // answers.
@@ -354,7 +584,27 @@ pub fn to_cubics(a: CurveArcCenter) -> [CurveCubic] []
 //     println("${curvearc.cubic_error(a) < 0.001}")   // true
 // ```
 pub fn cubic_error(a: CurveArcCenter) -> Float []
-    todo("curves-nv.curvearc.cubic_error")
+    let pieces = to_cubics(a)
+    let count = list.len(pieces)
+    if count == 0
+        // cov: skip — `to_cubics` opens its count at one piece and never
+        // lowers it, so the list it answers is never empty
+        return 0.0
+    // The divergence peaks at a fixed fraction along each piece, so
+    // the panel puts samples there as well as evenly.
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    let peak = (1.0 - 1.0 / math.sqrt(3.0)) / 2.0
+    var worst = 0.0
+    for i in 0..count
+        let piece = list.get(pieces, i)
+        var j = 0
+        while j <= 16
+            worst = math.max(worst, radial_gap(a, piece, j as Float / 16.0, cr, sr))
+            j = j + 1
+        worst = math.max(worst, radial_gap(a, piece, peak, cr, sr))
+        worst = math.max(worst, radial_gap(a, piece, 1.0 - peak, cr, sr))
+    worst
 
 // The smallest rectangle containing the arc.
 //
@@ -371,7 +621,49 @@ pub fn cubic_error(a: CurveArcCenter) -> Float []
 //     println("${a.rx - curvearc.bounds(a).width < 0.001}")   // true
 // ```
 pub fn bounds(a: CurveArcCenter) -> CurveRect []
-    todo("curves-nv.curvearc.bounds")
+    // The endpoints and whichever axis extremes the sweep passes
+    // through — never the ellipse's whole box.  A TILTED ellipse is
+    // widest at angles that are not quarter turns, so the two angles
+    // that make each derivative vanish are solved for rather than
+    // assumed.
+    var xs: [Float] = []
+    var ys: [Float] = []
+    let start = eval(a, 0.0)
+    let end = eval(a, 1.0)
+    list.push(xs, start.x)
+    list.push(ys, start.y)
+    list.push(xs, end.x)
+    list.push(ys, end.y)
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    let widest = math.atan2(0.0 - a.ry * sr, a.rx * cr)
+    let tallest = math.atan2(a.ry * cr, a.rx * sr)
+    let half_turn = math.pi()
+    var extremes: [Float] = [widest, widest + half_turn,
+                             tallest, tallest + half_turn]
+    for k in 0..list.len(extremes)
+        let theta = list.get(extremes, k)
+        if angle_covered(a, theta)
+            let p = point_at_angle(a, theta)
+            list.push(xs, p.x)
+            list.push(ys, p.y)
+    var minx = list.get(xs, 0)
+    var maxx = minx
+    for i in 1..list.len(xs)
+        let v = list.get(xs, i)
+        if v < minx
+            minx = v
+        if v > maxx
+            maxx = v
+    var miny = list.get(ys, 0)
+    var maxy = miny
+    for j in 1..list.len(ys)
+        let v = list.get(ys, j)
+        if v < miny
+            miny = v
+        if v > maxy
+            maxy = v
+    curvepoint.rect(minx, miny, maxx - minx, maxy - miny)
 
 // The arc under an affine transform.
 //
@@ -390,4 +682,40 @@ pub fn bounds(a: CurveArcCenter) -> CurveRect []
 //     println("${curvearc.transform(a, geomxform.scaling(2.0, 1.0)).rx}")   // 2
 // ```
 pub fn transform(a: CurveArcCenter, t: GeomXform) -> CurveArcCenter []
-    todo("curves-nv.curvearc.transform")
+    // The arc is `centre + M (cos, sin)` in the ellipse's own frame,
+    // so transform the radius-vector matrix `M = linear R(rot)
+    // diag(rx, ry)` as a whole.  Its singular value decomposition
+    // rewrites it as a rotation, a scale and a rotation: the outer
+    // rotation is the new tilt, the scales are the new radii, and the
+    // inner rotation shifts the starting angle.
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    // `R(rot) diag(rx, ry)` in the caller's column order.
+    let r11 = cr * a.rx
+    let r12 = (0.0 - sr) * a.ry
+    let r21 = sr * a.rx
+    let r22 = cr * a.ry
+    let p = t.a * r11 + t.c * r21
+    let q = t.a * r12 + t.c * r22
+    let r = t.b * r11 + t.d * r21
+    let s = t.b * r12 + t.d * r22
+    let e = (p + s) / 2.0
+    let f = (p - s) / 2.0
+    let g = (r + q) / 2.0
+    let h = (r - q) / 2.0
+    let qq = math.hypot(e, h)
+    let rr = math.hypot(f, g)
+    let sx = qq + rr
+    let sy = qq - rr
+    let theta = (math.atan2(h, e) + math.atan2(g, f)) / 2.0
+    let phi = (math.atan2(h, e) - math.atan2(g, f)) / 2.0
+    let center = curvepoint.of_geom(geomxform.apply_point(t, curvepoint.to_geom(a.center)))
+    var angle = a.start_angle + phi
+    var sweep = a.sweep_angle
+    if sy < 0.0
+        // A reflection reverses the sweep and measures the angles
+        // backwards.
+        angle = 0.0 - angle
+        sweep = 0.0 - sweep
+        return center_arc(center, sx, 0.0 - sy, theta, angle, sweep)
+    center_arc(center, sx, sy, theta, angle, sweep)

@@ -1,9 +1,6 @@
 // curvecubic_tests.nv — the cubic Bézier, which every other family in
 // this package reduces to.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: curves-nv.curvecubic.<fn>`.
-//
 // THE CURVE USED THROUGHOUT the exact-bounds cases is the symmetric
 // S from (0,0) to (1,0) with controls at (0,1) and (1,1).  Its
 // greatest height is 0.75 and not 1, which is the difference between

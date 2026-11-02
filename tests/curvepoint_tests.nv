@@ -1,8 +1,5 @@
 // curvepoint_tests.nv — the point, the vector, the rectangle and the
 // bridge to geometry-nv.
-//
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: curves-nv.curvepoint.<fn>`.
 
 use std.test
 use std.list

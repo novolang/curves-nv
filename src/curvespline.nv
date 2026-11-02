@@ -43,6 +43,174 @@
 // piece by piece.
 
 use curvepoint
+use curvecubic
+use curvefault
+
+// ── the arithmetic both splines are built on ────────────────────────
+
+// Where a normalised parameter falls in knot units.  `0.0` is the
+// first knot of the domain and `1.0` the last, so a caller never has
+// to read the knot vector to step along the spline.
+fn knot_at(lo: Float, hi: Float, t: Float) -> Float
+    if t <= 0.0
+        return lo
+    if t >= 1.0
+        return hi
+    lo + t * (hi - lo)
+
+// The knot span `x` falls in: the last index whose knot does not
+// exceed it, which is also the span a repeated interior knot belongs
+// to on the right.
+fn span_of(degree: Int, knots: [Float], x: Float, count: Int) -> Int
+    var k = degree
+    for i in degree..count
+        if list.get(knots, i) <= x
+            k = i
+    k
+
+// de Boor's algorithm on the control points: the numerically stable
+// way to evaluate a B-spline, and one that takes the value of a
+// clamped spline at `1.0` to be exactly its last control point.
+fn spline_at(controls: [CurvePoint], degree: Int, knots: [Float], x: Float,
+             count: Int) -> CurvePoint
+    let k = span_of(degree, knots, x, count)
+    var ds: [CurvePoint] = []
+    var j = 0
+    while j <= degree
+        list.push(ds, list.get(controls, j + k - degree))
+        j = j + 1
+    var r = 1
+    while r <= degree
+        var d = degree
+        while d >= r
+            let below = list.get(knots, d + k - degree)
+            let den = list.get(knots, d + 1 + k - r) - below
+            var alpha = 0.0
+            if den != 0.0
+                alpha = (x - below) / den
+            let prev = list.get(ds, d - 1)
+            let cur = list.get(ds, d)
+            ds[d] = curvepoint.pt((1.0 - alpha) * prev.x + alpha * cur.x,
+                                  (1.0 - alpha) * prev.y + alpha * cur.y)
+            d = d - 1
+        r = r + 1
+    list.get(ds, degree)
+
+// The same, for the derivative spline's control vectors.
+fn spline_at_vec(controls: [CurveVec], degree: Int, knots: [Float], x: Float,
+                 count: Int) -> CurveVec
+    let k = span_of(degree, knots, x, count)
+    var ds: [CurveVec] = []
+    var j = 0
+    while j <= degree
+        list.push(ds, list.get(controls, j + k - degree))
+        j = j + 1
+    var r = 1
+    while r <= degree
+        var d = degree
+        while d >= r
+            let below = list.get(knots, d + k - degree)
+            let den = list.get(knots, d + 1 + k - r) - below
+            var alpha = 0.0
+            if den != 0.0
+                alpha = (x - below) / den
+            let prev = list.get(ds, d - 1)
+            let cur = list.get(ds, d)
+            ds[d] = curvepoint.vec((1.0 - alpha) * prev.dx + alpha * cur.dx,
+                                   (1.0 - alpha) * prev.dy + alpha * cur.dy)
+            d = d - 1
+        r = r + 1
+    list.get(ds, degree)
+
+// The derivative of a B-spline is another B-spline: one degree lower,
+// one control fewer, and control vectors `p (P[i+1] - P[i]) /
+// (U[i+p+1] - U[i+1])`.  Keeping it a spline rather than differencing
+// samples is what makes the derivative exact.
+//
+// The span in the denominator is the SUPPORT of the basis function the
+// difference replaces, and it is bounded by `U[i+1]` and not by `U[i]`:
+// the two agree only where the knots happen to be equally spaced there,
+// which is why a spline with an interior knot of a different width — a
+// clamped one, or a non-uniform one — comes out wrong with `U[i]`.
+fn derivative_controls(controls: [CurvePoint], degree: Int, knots: [Float]) -> [CurveVec]
+    var out: [CurveVec] = []
+    for i in 0..list.len(controls) - 1
+        let span = list.get(knots, i + degree + 1) - list.get(knots, i + 1)
+        var dx = 0.0
+        var dy = 0.0
+        if span != 0.0
+            let step = degree as Float / span
+            dx = step * (list.get(controls, i + 1).x - list.get(controls, i).x)
+            dy = step * (list.get(controls, i + 1).y - list.get(controls, i).y)
+        list.push(out, curvepoint.vec(dx, dy))
+    out
+
+// The spans that hold curve: the ones between two different knots.
+fn live_spans(b: CurveBspline) -> [Int]
+    var out: [Int] = []
+    for k in b.degree..list.len(b.controls)
+        if list.get(b.knots, k) < list.get(b.knots, k + 1)
+            list.push(out, k)
+    out
+
+// The two ends of the spline's domain in knot units.
+fn domain_lo(b: CurveBspline) -> Float
+    list.get(b.knots, b.degree)
+
+fn domain_hi(b: CurveBspline) -> Float
+    list.get(b.knots, list.len(b.controls))
+
+// The knot interval a spacing rule gives a pair of points.  `uniform`
+// spaces every pair by one whatever the distance, which is what makes
+// it cusp.
+fn interval_of(a: CurveAlpha, from: CurvePoint, to: CurvePoint) -> Float
+    let d = curvepoint.distance(from, to)
+    match a
+        CurveAlphaUniform     => 1.0
+        CurveAlphaCentripetal => math.sqrt(d)
+        CurveAlphaChordal     => d
+
+// The non-uniform Catmull-Rom tangent at a knot, from Yuksel et al.'s
+// formulation: the two one-sided secants with the central one
+// subtracted, which is what keeps the curve inside the control polygon
+// when the spacing is centripetal.
+fn catmull_tangent(prev: CurvePoint, cur: CurvePoint, next: CurvePoint, dt_prev: Float,
+                   dt_next: Float) -> CurveVec
+    var ax = 0.0
+    var ay = 0.0
+    if dt_prev > 0.0
+        ax = (cur.x - prev.x) / dt_prev
+        ay = (cur.y - prev.y) / dt_prev
+    var cx = 0.0
+    var cy = 0.0
+    if dt_next > 0.0
+        cx = (next.x - cur.x) / dt_next
+        cy = (next.y - cur.y) / dt_next
+    var bx = 0.0
+    var by = 0.0
+    if dt_prev + dt_next > 0.0
+        bx = (next.x - prev.x) / (dt_prev + dt_next)
+        by = (next.y - prev.y) / (dt_prev + dt_next)
+    curvepoint.vec(ax - bx + cx, ay - by + cy)
+
+// One segment of a Catmull-Rom spline as the cubic it is: the Hermite
+// form of the two endpoints and the two tangents, which is a change of
+// basis and not an approximation.
+fn catmull_cubic(s: CurveCatmull, k: Int) -> CurveCubic
+    let p0 = list.get(s.points, k)
+    let p1 = list.get(s.points, k + 1)
+    let p2 = list.get(s.points, k + 2)
+    let p3 = list.get(s.points, k + 3)
+    let d1 = interval_of(s.alpha, p0, p1)
+    let d2 = interval_of(s.alpha, p1, p2)
+    let d3 = interval_of(s.alpha, p2, p3)
+    let m1 = catmull_tangent(p0, p1, p2, d1, d2)
+    let m2 = catmull_tangent(p1, p2, p3, d2, d3)
+    let third = d2 / 3.0
+    curvecubic.cubic(p1,
+                     curvepoint.pt(p1.x + third * m1.dx, p1.y + third * m1.dy),
+                     curvepoint.pt(p2.x - third * m2.dx, p2.y - third * m2.dy),
+                     p2)
 
 // How a Catmull-Rom spline spaces its parameter between knots.
 //
@@ -121,7 +289,10 @@ pub struct CurveCatmull
 //     println(curvespline.alpha_name(CurveAlphaChordal))   // chordal
 // ```
 pub fn alpha_name(a: CurveAlpha) -> Str []
-    todo("curves-nv.curvespline.alpha_name")
+    match a
+        CurveAlphaUniform     => "uniform"
+        CurveAlphaCentripetal => "centripetal"
+        CurveAlphaChordal     => "chordal"
 
 // The exponent a spacing rule is: 0, 0.5, 1.
 //
@@ -135,7 +306,10 @@ pub fn alpha_name(a: CurveAlpha) -> Str []
 //     println("${curvespline.alpha_exponent(CurveAlphaCentripetal)}")   // 0.5
 // ```
 pub fn alpha_exponent(a: CurveAlpha) -> Float []
-    todo("curves-nv.curvespline.alpha_exponent")
+    match a
+        CurveAlphaUniform     => 0.0
+        CurveAlphaCentripetal => 0.5
+        CurveAlphaChordal     => 1.0
 
 // A B-spline with a knot vector the caller supplies.
 //
@@ -156,7 +330,19 @@ pub fn alpha_exponent(a: CurveAlpha) -> Float []
 // ```
 pub fn bspline(controls: [CurvePoint], degree: Int,
                knots: [Float]) -> Result<CurveBspline, CurveFault> []
-    todo("curves-nv.curvespline.bspline")
+    let count = list.len(controls)
+    if degree < 1 or degree > 7
+        return Err(CurveDegreeOutOfRange(degree))
+    if count < degree + 1
+        return Err(CurveTooFewControlPoints(count, degree + 1))
+    if list.len(knots) != count + degree + 1
+        return Err(CurveKnotCountWrong(list.len(knots), count + degree + 1))
+    var i = 1
+    while i < list.len(knots)
+        if list.get(knots, i) < list.get(knots, i - 1)
+            return Err(CurveKnotsNotAscending(i))
+        i = i + 1
+    Ok(CurveBspline { controls: controls, degree: degree, knots: knots })
 
 // A B-spline with the knot vector that clamps it to its endpoints.
 //
@@ -178,7 +364,7 @@ pub fn bspline(controls: [CurvePoint], degree: Int,
 //         Err(e) => println(e.message())
 // ```
 pub fn clamped_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspline, CurveFault> []
-    todo("curves-nv.curvespline.clamped_bspline")
+    bspline(controls, degree, clamped_knots(list.len(controls), degree))
 
 // A B-spline with a uniform knot vector.
 //
@@ -194,7 +380,15 @@ pub fn clamped_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspli
 //         Err(e) => println(e.message())
 // ```
 pub fn uniform_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspline, CurveFault> []
-    todo("curves-nv.curvespline.uniform_bspline")
+    // Every knot `degree + 1` apart, so the domain is several spans
+    // wide and the curve reaches neither end of its controls.
+    let m = list.len(controls) + degree + 1
+    var knots: [Float] = []
+    var i = 0
+    while i < m
+        list.push(knots, i as Float)
+        i = i + 1
+    bspline(controls, degree, knots)
 
 // The point at a parameter, `0.0` at the start of the spline's domain
 // and `1.0` at its end.
@@ -215,7 +409,12 @@ pub fn uniform_bspline(controls: [CurvePoint], degree: Int) -> Result<CurveBspli
 //         Err(e) => println(e.message())
 // ```
 pub fn eval(b: CurveBspline, t: Float) -> CurvePoint []
-    todo("curves-nv.curvespline.eval")
+    let count = list.len(b.controls)
+    let lo = domain_lo(b)
+    let hi = domain_hi(b)
+    if hi <= lo
+        return list.get(b.controls, 0)
+    spline_at(b.controls, b.degree, b.knots, knot_at(lo, hi, t), count)
 
 // The derivative at a parameter.
 //
@@ -231,7 +430,18 @@ pub fn eval(b: CurveBspline, t: Float) -> CurvePoint []
 //         Err(e) => println(e.message())
 // ```
 pub fn derivative(b: CurveBspline, t: Float) -> CurveVec []
-    todo("curves-nv.curvespline.derivative")
+    let count = list.len(b.controls) - 1
+    let lo = domain_lo(b)
+    let hi = domain_hi(b)
+    if count < 1 or hi <= lo
+        return curvepoint.vec(0.0, 0.0)
+    let qs = derivative_controls(b.controls, b.degree, b.knots)
+    let inner = list.slice(b.knots, 1, list.len(b.knots) - 1)
+    // The derivative spline is one degree lower over the same domain,
+    // so the only extra factor is the one from normalising the
+    // parameter to `0 ..= 1`.
+    let v = spline_at_vec(qs, b.degree - 1, inner, knot_at(lo, hi, t), count)
+    curvepoint.vec(v.dx * (hi - lo), v.dy * (hi - lo))
 
 // How many cubic segments the spline has.
 //
@@ -247,7 +457,7 @@ pub fn derivative(b: CurveBspline, t: Float) -> CurveVec []
 //         Err(e) => println(e.message())
 // ```
 pub fn segment_count(b: CurveBspline) -> Int []
-    todo("curves-nv.curvespline.segment_count")
+    list.len(live_spans(b))
 
 // The spline as cubic Béziers.  EXACT for degree 3.
 //
@@ -271,7 +481,28 @@ pub fn segment_count(b: CurveBspline) -> Int []
 //         Ok(b)  => println("${list.len(curvespline.to_cubics(b))}")   // 1
 // ```
 pub fn to_cubics(b: CurveBspline) -> [CurveCubic] []
-    todo("curves-nv.curvespline.to_cubics")
+    let spans = live_spans(b)
+    var out: [CurveCubic] = []
+    let lo = domain_lo(b)
+    let hi = domain_hi(b)
+    if hi <= lo or list.len(spans) == 0
+        return out
+    let width = hi - lo
+    for i in 0..list.len(spans)
+        let k = list.get(spans, i)
+        let s0 = (list.get(b.knots, k) - lo) / width
+        let s1 = (list.get(b.knots, k + 1) - lo) / width
+        let p0 = eval(b, s0)
+        let p3 = eval(b, s1)
+        let d0 = derivative(b, s0)
+        let d1 = derivative(b, s1)
+        let third = (s1 - s0) / 3.0
+        list.push(out, curvecubic.cubic(
+            p0,
+            curvepoint.pt(p0.x + third * d0.dx, p0.y + third * d0.dy),
+            curvepoint.pt(p3.x - third * d1.dx, p3.y - third * d1.dy),
+            p3))
+    out
 
 // The knot vector a clamped spline of this size and degree has.
 //
@@ -287,7 +518,23 @@ pub fn to_cubics(b: CurveBspline) -> [CurveCubic] []
 //     println("${list.len(curvespline.clamped_knots(4, 3))}")   // 8
 // ```
 pub fn clamped_knots(control_count: Int, degree: Int) -> [Float] []
-    todo("curves-nv.curvespline.clamped_knots")
+    var out: [Float] = []
+    var i = 0
+    while i <= degree
+        list.push(out, 0.0)
+        i = i + 1
+    // The interior knots, spread evenly.  None at all when the degree
+    // and the control count leave no room for one.
+    let inner = control_count - degree - 1
+    var j = 1
+    while j <= inner
+        list.push(out, j as Float / (inner + 1) as Float)
+        j = j + 1
+    var k = 0
+    while k <= degree
+        list.push(out, 1.0)
+        k = k + 1
+    out
 
 // The spline with one control point moved.
 //
@@ -312,7 +559,17 @@ pub fn clamped_knots(control_count: Int, degree: Int) -> [Float] []
 // ```
 pub fn move_control(b: CurveBspline, index: Int,
                     to: CurvePoint) -> Result<CurveBspline, CurveFault> []
-    todo("curves-nv.curvespline.move_control")
+    if index < 0 or index >= list.len(b.controls)
+        return Err(CurveParameterOutOfRange(index as Float))
+    // A fresh list rather than a write into the caller's, so moving a
+    // control does not move it in the spline that was passed in.
+    var moved: [CurvePoint] = []
+    for i in 0..list.len(b.controls)
+        if i == index
+            list.push(moved, to)
+        else
+            list.push(moved, list.get(b.controls, i))
+    Ok(CurveBspline { controls: moved, degree: b.degree, knots: b.knots })
 
 // Which segment indices a control point affects.
 //
@@ -329,7 +586,20 @@ pub fn move_control(b: CurveBspline, index: Int,
 //         Ok(b)  => println("${list.len(curvespline.affected_segments(b, 1))}")
 // ```
 pub fn affected_segments(b: CurveBspline, index: Int) -> [Int] []
-    todo("curves-nv.curvespline.affected_segments")
+    var out: [Int] = []
+    if index < 0 or index >= list.len(b.controls)
+        return out
+    // The control's basis function is non-zero only between the knots
+    // `degree + 1` apart that bracket it, so only the spans that
+    // overlap that interval move.
+    let low = list.get(b.knots, index)
+    let high = list.get(b.knots, index + b.degree + 1)
+    let spans = live_spans(b)
+    for i in 0..list.len(spans)
+        let k = list.get(spans, i)
+        if list.get(b.knots, k + 1) > low and list.get(b.knots, k) < high
+            list.push(out, i)
+    out
 
 // A Catmull-Rom spline through these points, centripetal.
 //
@@ -353,7 +623,7 @@ pub fn affected_segments(b: CurveBspline, index: Int) -> [Int] []
 //         Err(e) => println(e.message())
 // ```
 pub fn catmull_rom(points: [CurvePoint]) -> Result<CurveCatmull, CurveFault> []
-    todo("curves-nv.curvespline.catmull_rom")
+    catmull_rom_with(points, CurveAlphaCentripetal)
 
 // A Catmull-Rom spline with a spacing rule of the caller's choosing.
 //
@@ -370,7 +640,9 @@ pub fn catmull_rom(points: [CurvePoint]) -> Result<CurveCatmull, CurveFault> []
 // ```
 pub fn catmull_rom_with(points: [CurvePoint],
                         alpha: CurveAlpha) -> Result<CurveCatmull, CurveFault> []
-    todo("curves-nv.curvespline.catmull_rom_with")
+    if list.len(points) < 4
+        return Err(CurveTooFewKnotPoints(list.len(points)))
+    Ok(CurveCatmull { points: points, alpha: alpha })
 
 // The point at a parameter of a Catmull-Rom spline.
 //
@@ -389,7 +661,23 @@ pub fn catmull_rom_with(points: [CurvePoint],
 //         Err(e) => println(e.message())
 // ```
 pub fn catmull_eval(s: CurveCatmull, t: Float) -> CurvePoint []
-    todo("curves-nv.curvespline.catmull_eval")
+    let count = list.len(s.points) - 3
+    if count < 1
+        return list.get(s.points, 0)
+    var t01 = t
+    if t01 < 0.0
+        t01 = 0.0
+    if t01 > 1.0
+        t01 = 1.0
+    // The segments share the parameter evenly, so the whole spline
+    // runs `0.0` at the first interior knot to `1.0` at the last.
+    var k = count - 1
+    var u = 1.0
+    if t01 < 1.0
+        let scaled = t01 * count as Float
+        k = scaled as Int
+        u = scaled - k as Float
+    curvecubic.eval(catmull_cubic(s, k), u)
 
 // The Catmull-Rom spline as cubic Béziers.  EXACT.
 //
@@ -411,7 +699,10 @@ pub fn catmull_eval(s: CurveCatmull, t: Float) -> CurvePoint []
 //         Ok(s)  => println("${list.len(curvespline.catmull_to_cubics(s))}")   // 2
 // ```
 pub fn catmull_to_cubics(s: CurveCatmull) -> [CurveCubic] []
-    todo("curves-nv.curvespline.catmull_to_cubics")
+    var out: [CurveCubic] = []
+    for k in 0..list.len(s.points) - 3
+        list.push(out, catmull_cubic(s, k))
+    out
 
 // Whether this spline can cusp or self-intersect.
 //
@@ -431,4 +722,7 @@ pub fn catmull_to_cubics(s: CurveCatmull) -> [CurveCubic] []
 //         Err(e) => println(e.message())
 // ```
 pub fn may_self_intersect(s: CurveCatmull) -> Bool []
-    todo("curves-nv.curvespline.may_self_intersect")
+    match s.alpha
+        CurveAlphaCentripetal => false
+        CurveAlphaUniform     => true
+        CurveAlphaChordal     => true

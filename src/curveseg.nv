@@ -33,7 +33,185 @@
 
 use curvepoint
 use curvecubic
+use curvearc
+use curvequad
 use geomxform
+use curvefault
+
+// ── the formulas a line gets and the searches an arc needs ──────────
+
+fn xform_point(t: GeomXform, p: CurvePoint) -> CurvePoint
+    curvepoint.of_geom(geomxform.apply_point(t, curvepoint.to_geom(p)))
+
+// A line's nearest point is a projection and not a search, and the
+// parameter that falls outside the segment is clamped to its ends.
+fn line_projection(from: CurvePoint, to: CurvePoint, at: CurvePoint,
+                   tolerance: Float) -> CurveProjection
+    let dx = to.x - from.x
+    let dy = to.y - from.y
+    let den = dx * dx + dy * dy
+    var t = 0.0
+    if den > 0.0
+        t = ((at.x - from.x) * dx + (at.y - from.y) * dy) / den
+    if t < 0.0
+        t = 0.0
+    if t > 1.0
+        t = 1.0
+    let p = curvepoint.lerp(from, to, t)
+    CurveProjection { t: t, point: p, distance: curvepoint.distance(p, at) }
+
+// Where a line segment crosses the infinite line through two points.
+fn line_hits(from: CurvePoint, to: CurvePoint, a: CurvePoint, b: CurvePoint) -> [CurveHit]
+    var out: [CurveHit] = []
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let rx = to.x - from.x
+    let ry = to.y - from.y
+    let den = rx * dy - ry * dx
+    if den != 0.0
+        let t = ((a.x - from.x) * dy - (a.y - from.y) * dx) / den
+        if t >= 0.0 and t <= 1.0
+            let p = curvepoint.lerp(from, to, t)
+            var line_t = 0.0
+            let lden = dx * dx + dy * dy
+            if lden > 0.0
+                line_t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lden
+            list.push(out, CurveHit { t: t, point: p, line_t: line_t })
+    out
+
+// The parameter an angle has on an arc, or `-1.0` when the sweep does
+// not reach it.
+fn angle_param(a: CurveArcCenter, angle: Float) -> Float
+    let sweep = a.sweep_angle
+    if sweep == 0.0
+        return 0.0 - 1.0
+    let turn = 2.0 * math.pi()
+    var rel = angle - a.start_angle
+    if sweep > 0.0
+        while rel < 0.0
+            rel = rel + turn
+        while rel >= turn
+            rel = rel - turn
+        if rel <= sweep + 1e-12
+            return rel / sweep
+        return 0.0 - 1.0
+    while rel > 0.0
+        rel = rel - turn
+    while rel <= 0.0 - turn
+        rel = rel + turn
+    if rel >= sweep - 1e-12
+        return rel / sweep
+    0.0 - 1.0
+
+// The nearest point on an arc.  There is no closed form for an ellipse
+// — the condition is a quartic — so a coarse sweep finds the lobe and
+// a ternary search refines it, the distance along a small enough span
+// having one minimum.
+fn arc_nearest(a: CurveArcCenter, to: CurvePoint, tolerance: Float) -> CurveProjection
+    let samples = 64
+    var best = 0
+    var best_d = math.infinity()
+    var i = 0
+    while i <= samples
+        let d = curvepoint.distance(curvearc.eval(a, i as Float / samples as Float), to)
+        if d < best_d
+            best_d = d
+            best = i
+        i = i + 1
+    var lo = (best - 1) as Float / samples as Float
+    var hi = (best + 1) as Float / samples as Float
+    if lo < 0.0
+        lo = 0.0
+    if hi > 1.0
+        hi = 1.0
+    var step = 0
+    while hi - lo > tolerance and step < 200
+        let third = (hi - lo) / 3.0
+        if curvepoint.distance(curvearc.eval(a, lo + third), to)
+           <= curvepoint.distance(curvearc.eval(a, hi - third), to)
+            hi = hi - third
+        else
+            lo = lo + third
+        step = step + 1
+    let t = (lo + hi) / 2.0
+    let p = curvearc.eval(a, t)
+    CurveProjection { t: t, point: p, distance: curvepoint.distance(p, to) }
+
+// Where an arc crosses the infinite line through two points: onto the
+// unit circle, then the quadratic, then back.
+fn arc_hits(a: CurveArcCenter, p: CurvePoint, q: CurvePoint) -> [CurveHit]
+    var out: [CurveHit] = []
+    if a.rx == 0.0 or a.ry == 0.0
+        return out
+    let cr = math.cos(a.rotation)
+    let sr = math.sin(a.rotation)
+    let px = (cr * (p.x - a.center.x) + sr * (p.y - a.center.y)) / a.rx
+    let py = ((0.0 - sr) * (p.x - a.center.x) + cr * (p.y - a.center.y)) / a.ry
+    let qx = (cr * (q.x - a.center.x) + sr * (q.y - a.center.y)) / a.rx
+    let qy = ((0.0 - sr) * (q.x - a.center.x) + cr * (q.y - a.center.y)) / a.ry
+    let dx = qx - px
+    let dy = qy - py
+    let qa = dx * dx + dy * dy
+    if qa == 0.0
+        return out
+    let qb = 2.0 * (px * dx + py * dy)
+    let qc = px * px + py * py - 1.0
+    let disc = qb * qb - 4.0 * qa * qc
+    if disc < 0.0
+        return out
+    let root = math.sqrt(disc)
+    var rs: [Float] = [0.0 - qb / (2.0 * qa)]
+    if root > 0.0
+        rs = [0.0 - (qb + root) / (2.0 * qa), 0.0 - (qb - root) / (2.0 * qa)]
+    let ldx = q.x - p.x
+    let ldy = q.y - p.y
+    let lden = ldx * ldx + ldy * ldy
+    for i in 0..list.len(rs)
+        let s = list.get(rs, i)
+        let t = angle_param(a, math.atan2(py + dy * s, px + dx * s))
+        if t >= 0.0 and t <= 1.0
+            let hit = curvearc.eval(a, t)
+            var line_t = 0.0
+            if lden > 0.0
+                line_t = ((hit.x - p.x) * ldx + (hit.y - p.y) * ldy) / lden
+            list.push(out, CurveHit { t: t, point: hit, line_t: line_t })
+    out
+
+// The parameter a distance along an arc lands at.
+fn arc_t_for_length(a: CurveArcCenter, d: Float, tolerance: Float) -> Result<Float, CurveFault> []
+    let total = curvearc.arc_length(a, tolerance)!
+    if total <= 0.0
+        // cov: skip — `point_at_distance` is the only caller, and it reaches
+        // this through the same `curvearc.arc_length(a, tolerance)` it gates
+        // on with `span > 0.0`, so a zero-length arc never gets here
+        return Ok(0.0)
+    if d >= total
+        return Ok(1.0)
+    // A circle's length is proportional to its sweep, so there the
+    // answer is a ratio rather than a search.
+    if a.rx == a.ry
+        return Ok(d / total)
+    var lo = 0.0
+    var hi = 1.0
+    var i = 0
+    while i < 60
+        let mid = (lo + hi) / 2.0
+        let head = curvearc.subdivide(a, mid)
+        let have = curvearc.arc_length(head.0, tolerance)!
+        if have < d
+            lo = mid
+        else
+            hi = mid
+        i = i + 1
+    Ok((lo + hi) / 2.0)
+
+// Which of the four closed forms or searches a distance needs.
+fn t_for_distance(s: CurveSegment, d: Float, tolerance: Float) -> Result<Float, CurveFault> []
+    match s
+        CurveSegLine(from, to) => Ok(d / curvepoint.distance(from, to))
+        CurveSegQuad(q)        => curvequad.t_for_length(q, d, tolerance)
+        CurveSegCubic(c)       => curvecubic.t_for_length(c, d, tolerance)
+        CurveSegArc(a)         => arc_t_for_length(a, d, tolerance)
 
 // One piece of a path.
 //
@@ -67,7 +245,11 @@ pub enum CurveSegment
 //                                             curvepoint.pt(1.0, 0.0))))
 // ```
 pub fn kind_name(s: CurveSegment) -> Str []
-    todo("curves-nv.curveseg.kind_name")
+    match s
+        CurveSegLine(_, _) => "line"
+        CurveSegQuad(_)    => "quad"
+        CurveSegCubic(_)   => "cubic"
+        CurveSegArc(_)     => "arc"
 
 // Where the segment starts.
 //
@@ -80,7 +262,11 @@ pub fn kind_name(s: CurveSegment) -> Str []
 //     println("${curveseg.start(s).x}")         // 1
 // ```
 pub fn start(s: CurveSegment) -> CurvePoint []
-    todo("curves-nv.curveseg.start")
+    match s
+        CurveSegLine(from, _) => from
+        CurveSegQuad(q)       => q.p0
+        CurveSegCubic(c)      => c.p0
+        CurveSegArc(a)        => curvearc.eval(a, 0.0)
 
 // Where the segment ends.
 //
@@ -93,7 +279,11 @@ pub fn start(s: CurveSegment) -> CurvePoint []
 //     println("${curveseg.end(s).x}")           // 2
 // ```
 pub fn end(s: CurveSegment) -> CurvePoint []
-    todo("curves-nv.curveseg.end")
+    match s
+        CurveSegLine(_, to) => to
+        CurveSegQuad(q)     => q.p2
+        CurveSegCubic(c)    => c.p3
+        CurveSegArc(a)      => curvearc.eval(a, 1.0)
 
 // The point at a parameter.
 //
@@ -106,7 +296,11 @@ pub fn end(s: CurveSegment) -> CurvePoint []
 //     println("${curveseg.eval(s, 0.5).x}")     // 1
 // ```
 pub fn eval(s: CurveSegment, t: Float) -> CurvePoint []
-    todo("curves-nv.curveseg.eval")
+    match s
+        CurveSegLine(from, to) => curvepoint.lerp(from, to, t)
+        CurveSegQuad(q)        => curvequad.eval(q, t)
+        CurveSegCubic(c)       => curvecubic.eval(c, t)
+        CurveSegArc(a)         => curvearc.eval(a, t)
 
 // The derivative at a parameter.
 //
@@ -119,7 +313,11 @@ pub fn eval(s: CurveSegment, t: Float) -> CurvePoint []
 //     println("${curveseg.derivative(s, 0.5).dx}")   // 2
 // ```
 pub fn derivative(s: CurveSegment, t: Float) -> CurveVec []
-    todo("curves-nv.curveseg.derivative")
+    match s
+        CurveSegLine(from, to) => curvepoint.between(from, to)
+        CurveSegQuad(q)        => curvequad.derivative(q, t)
+        CurveSegCubic(c)       => curvecubic.derivative(c, t)
+        CurveSegArc(a)         => curvearc.derivative(a, t)
 
 // The segment's length, to a tolerance.
 //
@@ -139,7 +337,11 @@ pub fn derivative(s: CurveSegment, t: Float) -> CurveVec []
 //         Err(e) => println(e.message())
 // ```
 pub fn arc_length(s: CurveSegment, tolerance: Float) -> Result<Float, CurveFault> []
-    todo("curves-nv.curveseg.arc_length")
+    match s
+        CurveSegLine(from, to) => Ok(curvepoint.distance(from, to))
+        CurveSegQuad(q)        => Ok(curvequad.arc_length(q))
+        CurveSegCubic(c)       => curvecubic.arc_length(c, tolerance)
+        CurveSegArc(a)         => curvearc.arc_length(a, tolerance)
 
 // The segment as a polyline within a tolerance of it.
 //
@@ -158,7 +360,16 @@ pub fn arc_length(s: CurveSegment, tolerance: Float) -> Result<Float, CurveFault
 //         Err(e)  => println(e.message())
 // ```
 pub fn flatten(s: CurveSegment, tolerance: Float) -> Result<[CurvePoint], CurveFault> []
-    todo("curves-nv.curveseg.flatten")
+    // Checked here rather than per family, because a path of lines
+    // would otherwise accept a tolerance that does not terminate for
+    // the curve next to it.
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    match s
+        CurveSegLine(from, to) => Ok([from, to])
+        CurveSegQuad(q)        => curvequad.flatten(q, tolerance)
+        CurveSegCubic(c)       => curvecubic.flatten(c, tolerance)
+        CurveSegArc(a)         => curvearc.flatten(a, tolerance)
 
 // The smallest rectangle containing the segment.
 //
@@ -171,7 +382,13 @@ pub fn flatten(s: CurveSegment, tolerance: Float) -> Result<[CurvePoint], CurveF
 //     println("${curveseg.bounds(s).width}")    // 2
 // ```
 pub fn bounds(s: CurveSegment) -> CurveRect []
-    todo("curves-nv.curveseg.bounds")
+    match s
+        CurveSegLine(from, to) =>
+            curvepoint.rect(math.min(from.x, to.x), math.min(from.y, to.y),
+                            math.abs(to.x - from.x), math.abs(to.y - from.y))
+        CurveSegQuad(q)        => curvequad.bounds(q)
+        CurveSegCubic(c)       => curvecubic.bounds(c)
+        CurveSegArc(a)         => curvearc.bounds(a)
 
 // The point on the segment nearest a given point.
 //
@@ -187,7 +404,13 @@ pub fn bounds(s: CurveSegment) -> CurveRect []
 // ```
 pub fn nearest_point(s: CurveSegment, to: CurvePoint,
                      tolerance: Float) -> Result<CurveProjection, CurveFault> []
-    todo("curves-nv.curveseg.nearest_point")
+    if tolerance <= 0.0
+        return Err(CurveToleranceNotPositive(tolerance))
+    match s
+        CurveSegLine(from, dest) => Ok(line_projection(from, dest, to, tolerance))
+        CurveSegQuad(q)          => curvequad.nearest_point(q, to, tolerance)
+        CurveSegCubic(c)         => curvecubic.nearest_point(c, to, tolerance)
+        CurveSegArc(a)           => Ok(arc_nearest(a, to, tolerance))
 
 // Where the segment crosses an infinite line through two points.
 //
@@ -202,7 +425,11 @@ pub fn nearest_point(s: CurveSegment, to: CurvePoint,
 //                                                 curvepoint.pt(1.0, 0.0)))}")   // 1
 // ```
 pub fn intersect_line(s: CurveSegment, a: CurvePoint, b: CurvePoint) -> [CurveHit] []
-    todo("curves-nv.curveseg.intersect_line")
+    match s
+        CurveSegLine(from, to) => line_hits(from, to, a, b)
+        CurveSegQuad(q)        => curvequad.intersect_line(q, a, b)
+        CurveSegCubic(c)       => curvecubic.intersect_line(c, a, b)
+        CurveSegArc(arc)       => arc_hits(arc, a, b)
 
 // The segment split at a parameter.
 //
@@ -215,7 +442,19 @@ pub fn intersect_line(s: CurveSegment, a: CurvePoint, b: CurvePoint) -> [CurveHi
 //     println("${curveseg.end(curveseg.subdivide(s, 0.5).0).x}")   // 1
 // ```
 pub fn subdivide(s: CurveSegment, t: Float) -> (CurveSegment, CurveSegment) []
-    todo("curves-nv.curveseg.subdivide")
+    match s
+        CurveSegLine(from, to) =>
+            let mid = curvepoint.lerp(from, to, t)
+            (CurveSegLine(from, mid), CurveSegLine(mid, to))
+        CurveSegQuad(q)        =>
+            let halves = curvequad.subdivide(q, t)
+            (CurveSegQuad(halves.0), CurveSegQuad(halves.1))
+        CurveSegCubic(c)       =>
+            let halves = curvecubic.subdivide(c, t)
+            (CurveSegCubic(halves.0), CurveSegCubic(halves.1))
+        CurveSegArc(a)         =>
+            let halves = curvearc.subdivide(a, t)
+            (CurveSegArc(halves.0), CurveSegArc(halves.1))
 
 // The segment with its direction reversed.
 //
@@ -228,7 +467,14 @@ pub fn subdivide(s: CurveSegment, t: Float) -> (CurveSegment, CurveSegment) []
 //     println("${curveseg.start(curveseg.reverse(s)).x}")   // 2
 // ```
 pub fn reverse(s: CurveSegment) -> CurveSegment []
-    todo("curves-nv.curveseg.reverse")
+    match s
+        CurveSegLine(from, to) => CurveSegLine(to, from)
+        CurveSegQuad(q)        => CurveSegQuad(curvequad.reverse(q))
+        CurveSegCubic(c)       => CurveSegCubic(curvecubic.reverse(c))
+        CurveSegArc(a)         =>
+            CurveSegArc(curvearc.center_arc(a.center, a.rx, a.ry, a.rotation,
+                                            a.start_angle + a.sweep_angle,
+                                            0.0 - a.sweep_angle))
 
 // The segment under an affine transform.
 //
@@ -245,7 +491,12 @@ pub fn reverse(s: CurveSegment) -> CurveSegment []
 //     println("${curveseg.start(curveseg.transform(s, geomxform.translation(1.0, 0.0))).x}")
 // ```
 pub fn transform(s: CurveSegment, t: GeomXform) -> CurveSegment []
-    todo("curves-nv.curveseg.transform")
+    match s
+        CurveSegLine(from, to) =>
+            CurveSegLine(xform_point(t, from), xform_point(t, to))
+        CurveSegQuad(q)        => CurveSegQuad(curvequad.transform(q, t))
+        CurveSegCubic(c)       => CurveSegCubic(curvecubic.transform(c, t))
+        CurveSegArc(a)         => CurveSegArc(curvearc.transform(a, t))
 
 // The segment as cubic Béziers.
 //
@@ -262,7 +513,11 @@ pub fn transform(s: CurveSegment, t: GeomXform) -> CurveSegment []
 //     println("${list.len(curveseg.to_cubics(s))}")   // 1
 // ```
 pub fn to_cubics(s: CurveSegment) -> [CurveCubic] []
-    todo("curves-nv.curveseg.to_cubics")
+    match s
+        CurveSegLine(from, to) => [curvecubic.line(from, to)]
+        CurveSegQuad(q)        => [curvequad.to_cubic(q)]
+        CurveSegCubic(c)       => [c]
+        CurveSegArc(a)         => curvearc.to_cubics(a)
 
 // Whether converting this segment to cubics is exact.
 //
@@ -278,7 +533,11 @@ pub fn to_cubics(s: CurveSegment) -> [CurveCubic] []
 //     println("${curveseg.cubics_are_exact(s)}")   // true
 // ```
 pub fn cubics_are_exact(s: CurveSegment) -> Bool []
-    todo("curves-nv.curveseg.cubics_are_exact")
+    match s
+        CurveSegLine(_, _) => true
+        CurveSegQuad(_)    => true
+        CurveSegCubic(_)   => true
+        CurveSegArc(_)     => false
 
 // The length of a whole sequence of segments.
 //
@@ -293,7 +552,13 @@ pub fn cubics_are_exact(s: CurveSegment) -> Bool []
 //         Err(e) => println(e.message())
 // ```
 pub fn path_length(segments: [CurveSegment], tolerance: Float) -> Result<Float, CurveFault> []
-    todo("curves-nv.curveseg.path_length")
+    var total = 0.0
+    var i = 0
+    while i < list.len(segments)
+        let n = arc_length(list.get(segments, i), tolerance)!
+        total = total + n
+        i = i + 1
+    Ok(total)
 
 // The smallest rectangle containing a whole sequence of segments.
 //
@@ -309,7 +574,12 @@ pub fn path_length(segments: [CurveSegment], tolerance: Float) -> Result<Float, 
 //     println("${curveseg.path_bounds([a]).width}")   // 2
 // ```
 pub fn path_bounds(segments: [CurveSegment]) -> CurveRect []
-    todo("curves-nv.curveseg.path_bounds")
+    if list.len(segments) == 0
+        return curvepoint.rect(0.0, 0.0, 0.0, 0.0)
+    var acc = bounds(list.get(segments, 0))
+    for i in 1..list.len(segments)
+        acc = curvepoint.union(acc, bounds(list.get(segments, i)))
+    acc
 
 // A whole sequence of segments as one polyline.
 //
@@ -331,7 +601,18 @@ pub fn path_bounds(segments: [CurveSegment]) -> CurveRect []
 // ```
 pub fn path_flatten(segments: [CurveSegment],
                     tolerance: Float) -> Result<[CurvePoint], CurveFault> []
-    todo("curves-nv.curveseg.path_flatten")
+    var out: [CurvePoint] = []
+    var i = 0
+    while i < list.len(segments)
+        let pts = flatten(list.get(segments, i), tolerance)!
+        // Each segment after the first starts where the last ended, so
+        // its first point is already in the answer.
+        if i > 0
+            list.append(out, list.drop(pts, 1))
+        else
+            list.append(out, pts)
+        i = i + 1
+    Ok(out)
 
 // The point a given distance along a sequence of segments, and which
 // segment it fell in.
@@ -353,7 +634,25 @@ pub fn path_flatten(segments: [CurveSegment],
 // ```
 pub fn point_at_distance(segments: [CurveSegment], distance: Float,
                          tolerance: Float) -> Result<(Int, CurvePoint), CurveFault> []
-    todo("curves-nv.curveseg.point_at_distance")
+    if distance < 0.0
+        return Err(CurveArcLengthOutOfRange(distance, 0.0))
+    var remaining = distance
+    var travelled = 0.0
+    var i = 0
+    while i < list.len(segments)
+        let seg = list.get(segments, i)
+        let span = arc_length(seg, tolerance)!
+        if remaining <= span
+            var t = 0.0
+            if span > 0.0
+                t = t_for_distance(seg, remaining, tolerance)!
+            return Ok((i, eval(seg, t)))
+        remaining = remaining - span
+        travelled = travelled + span
+        i = i + 1
+    // Past the end is refused rather than clamped: a caller placing
+    // the last dash of a dashed line needs to know there is no room.
+    Err(CurveArcLengthOutOfRange(distance, travelled))
 
 // Whether the sequence's segments join end to start, within a
 // tolerance.
@@ -371,4 +670,11 @@ pub fn point_at_distance(segments: [CurveSegment], distance: Float,
 //     println("${curveseg.is_contiguous([a, b], 1e-9)}")   // true
 // ```
 pub fn is_contiguous(segments: [CurveSegment], tolerance: Float) -> Bool []
-    todo("curves-nv.curveseg.is_contiguous")
+    var i = 1
+    while i < list.len(segments)
+        let prev = list.get(segments, i - 1)
+        let cur = list.get(segments, i)
+        if curvepoint.distance(end(prev), start(cur)) > tolerance
+            return false
+        i = i + 1
+    true

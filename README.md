@@ -9,12 +9,6 @@ Catmull–Rom splines — as values, with the operations that measure,
 split and draw them. The reference implementation it is measured
 against is the Rust crate [`kurbo`](https://docs.rs/kurbo).
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What a curve is here
 
 A **Bézier curve** of degree `n` is defined by `n + 1` **control
@@ -99,10 +93,8 @@ fn main() [io]
                 Err(e) => println("cannot invert: ${e.message()}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: curves-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`. The suites under
+`tests/` are the specification this implementation was written against.
 
 ## What the package contains
 
@@ -256,22 +248,6 @@ mathematics.
   `n + d + 1` long.
 - Centripetal Catmull–Rom answers false to `may_self_intersect`, and
   uniform and chordal answer true.
-
-Today every one of those assertions reaches a `not implemented` panic.
-
-## Implementation status
-
-| Area | Status |
-| --- | --- |
-| Point, vector, rectangle, geometry-nv bridge | declared, not implemented |
-| Cubic Bézier, all operations | declared, not implemented |
-| Quadratic Bézier, with exact arc length | declared, not implemented |
-| Elliptical arc, both parameterisations | declared, not implemented |
-| B-spline and Catmull–Rom | declared, not implemented |
-| The segment union and the path operations | declared, not implemented |
-| Rational curves and NURBS | not declared — a later release |
-| Offset curves and stroking | not declared |
-| Curve–curve intersection | not declared |
 
 ## Licence
 
