@@ -5,7 +5,7 @@ All notable changes to curves-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
-## Unreleased — 2026-10-13
+## 0.1.0 — 2026-11-03
 
 ### Fixed
 
@@ -17,6 +17,8 @@ with the pre-1.0 rule that a breaking change bumps the MINOR number.
   the length of the cusp cubic whose cusp is at `t = 0.5` answered
   `0.5`, where the half-length parameter is 0.7550689.  Applies to
   `curvecubic.t_for_length` and `curvequad.t_for_length`.
+
+This release requires novo 0.23.0 or later.
 
 ## 0.1.0 — 2026-10-12
 
@@ -142,6 +144,10 @@ release already made.
   is fixed, `CurvePoint` becomes an alias for `GeomPointF` and the six
   bridge functions become the identity.  That is a source change and
   not a signature change, so it does not break a consumer.
+
+## 0.0.3 — 2026-10-25
+
+A file that names a sibling module's type, function or constant now has the `use` line for that module (E2033, E2003).  No signature and no behaviour changed.
 
 ## 0.0.2 — 2026-09-28
 
